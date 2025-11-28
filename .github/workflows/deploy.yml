@@ -9,6 +9,7 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    environment: dev
 
     steps:
     - name: Checkout code
@@ -29,3 +30,9 @@ jobs:
     - name: Terraform Apply
       working-directory: ./infra
       run: terraform apply -auto-approve
+      env:
+        TF_VAR_subscription_id: ${{ secrets.TF_VAR_SUBSCRIPTION_ID }}
+        TF_VAR_project_name: ${{ secrets.TF_VAR_PROJECT_NAME }}
+        TF_VAR_environment: ${{ secrets.TF_VAR_ENVIRONMENT }}
+        TF_VAR_location: ${{ secrets.TF_VAR_LOCATION }}
+        TF_VAR_storage_account_name: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
