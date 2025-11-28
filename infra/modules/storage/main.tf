@@ -32,3 +32,49 @@ resource "azurerm_storage_account" "this" {
 
   tags = var.tags
 }
+
+# Data Lake Gen2 Filesystem (Container) for parameters
+resource "azurerm_storage_data_lake_gen2_filesystem" "parameters" {
+  name               = "parameters"
+  storage_account_id = azurerm_storage_account.this.id
+}
+
+# Data Lake Gen2 Filesystem (Container) for medallion architecture
+# Folders will be created dynamically by Azure Functions during data ingestion
+resource "azurerm_storage_data_lake_gen2_filesystem" "datalake" {
+  name               = "datalake"
+  storage_account_id = azurerm_storage_account.this.id
+}
+
+resource "azurerm_storage_queue" "ingestion_weatherapi" {
+  name               = "ingestion-weatherapi"
+  storage_account_id = azurerm_storage_account.this.id
+}
+
+# Blob container for staging (Claim Check pattern)
+resource "azurerm_storage_container" "staging" {
+  name                  = "staging"
+  storage_account_id    = azurerm_storage_account.this.id
+  container_access_type = "private"
+}
+
+# Lifecycle management policy - auto-delete staging blobs after 7 days
+resource "azurerm_storage_management_policy" "staging_cleanup" {
+  storage_account_id = azurerm_storage_account.this.id
+
+  rule {
+    name    = "delete-old-staging-blobs"
+    enabled = true
+
+    filters {
+      prefix_match = ["staging/raw-ingestion/"]
+      blob_types   = ["blockBlob"]
+    }
+
+    actions {
+      base_blob {
+        delete_after_days_since_modification_greater_than = 7
+      }
+    }
+  }
+}

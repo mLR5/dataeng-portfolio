@@ -16,6 +16,7 @@ ENV/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+notebooks/
 
 # IDEs
 .vscode/
@@ -27,3 +28,9 @@ ENV/
 # Environment variables
 .env
 .env.local
+
+# Azure Functions
+local.settings.json
+
+# Project planning
+plan/
