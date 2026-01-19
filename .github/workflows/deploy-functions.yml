@@ -22,33 +22,12 @@ jobs:
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-
-    - name: Install dependencies
+    - name: Zip deploy Functions
       run: |
         cd functions
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt --target ./.python_packages/lib/site-packages
-        cd ..
-
-    - name: Create deployment package
-      run: |
-        cd functions
-        zip -r ../function-app.zip . -x "*.pyc" -x "*__pycache__*" -x "local.settings.json"
-        cd ..
-
-    - name: Deploy to Function App
-      run: |
+        zip -r ../functionapp.zip .
+        cd -
         az functionapp deployment source config-zip \
-          --name func-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
-          --resource-group rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
-          --src function-app.zip
-
-    - name: Restart Function App
-      run: |
-        az functionapp restart \
-          --name func-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
-          --resource-group rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }}
+          -g rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
+          -n func-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
+          --src functionapp.zip
