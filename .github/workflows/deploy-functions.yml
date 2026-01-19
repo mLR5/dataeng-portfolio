@@ -33,16 +33,13 @@ jobs:
         zip -r ../function-app.zip . -x "*.pyc" -x "*__pycache__*" -x "local.settings.json"
         cd ..
 
-    - name: Upload to deployment container
+    - name: Deploy to Function App
       run: |
-        az storage blob upload \
-          --container-name deploymentpackage \
-          --file function-app.zip \
-          --name released-package.zip \
-          --account-name ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }} \
-          --auth-mode key \
-          --account-key $(az storage account keys list --account-name ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }} --resource-group rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} --query '[0].value' -o tsv) \
-          --overwrite
+        az functionapp deployment source config-zip \
+          --name func-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
+          --resource-group rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
+          --src function-app.zip \
+          --build-remote
 
     - name: Restart Function App
       run: |
