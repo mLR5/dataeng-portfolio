@@ -46,6 +46,7 @@ resource "azurerm_function_app_flex_consumption" "this" {
       "AzureWebJobsStorage__accountName"   = var.storage_account_name
       "AzureWebJobsStorage__queueServiceUri" = "https://${var.storage_account_name}.queue.core.windows.net"
       "AzureWebJobsStorage__blobServiceUri"  = "https://${var.storage_account_name}.blob.core.windows.net"
+      "AzureWebJobsSTORAGE_CONNECTION_STRING" = var.storage_connection_string
       "AzureWebJobsFeatureFlags"          = "EnableWorkerIndexing"
       "WEATHERAPI_KEY"                    = "@Microsoft.KeyVault(SecretUri=${var.weatherapi_secret_uri})"
       "STORAGE_ACCOUNT_NAME"              = var.storage_account_name
@@ -53,6 +54,7 @@ resource "azurerm_function_app_flex_consumption" "this" {
       "QUEUE_NAME"                        = var.queue_name
       "DATALAKE_CONTAINER"                = var.datalake_container
       "STAGING_CONTAINER"                 = "staging"
+      "BRONZE_CONTAINER"                  = "bronze"
     },
     var.additional_app_settings
   )

@@ -39,8 +39,12 @@ resource "azurerm_storage_data_lake_gen2_filesystem" "parameters" {
   storage_account_id = azurerm_storage_account.this.id
 }
 
-# Data Lake Gen2 Filesystem (Container) for medallion architecture
-# Folders will be created dynamically by Azure Functions during data ingestion
+# Data Lake Gen2 Filesystems for medallion architecture
+resource "azurerm_storage_data_lake_gen2_filesystem" "bronze" {
+  name               = "bronze"
+  storage_account_id = azurerm_storage_account.this.id
+}
+
 resource "azurerm_storage_data_lake_gen2_filesystem" "datalake" {
   name               = "datalake"
   storage_account_id = azurerm_storage_account.this.id
