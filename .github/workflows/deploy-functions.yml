@@ -27,7 +27,9 @@ jobs:
         cd functions
         zip -r ../functionapp.zip .
         cd -
-        az functionapp deployment source config-zip \
-          -g rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
-          -n func-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
-          --src functionapp.zip
+        az webapp deploy \
+          --resource-group rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
+          --name func-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
+          --src-path functionapp.zip \
+          --type zip \
+          --async false
