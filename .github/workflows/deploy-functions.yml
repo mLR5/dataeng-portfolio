@@ -1,0 +1,51 @@
+name: Deploy Functions
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'functions/**'
+  workflow_dispatch:
+
+jobs:
+  deploy-functions:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Create deployment package
+      run: |
+        cd functions
+        zip -r ../function-app.zip . -x "*.pyc" -x "*__pycache__*" -x "local.settings.json"
+        cd ..
+
+    - name: Upload to deployment container
+      run: |
+        az storage blob upload \
+          --container-name deploymentpackage \
+          --file function-app.zip \
+          --name released-package.zip \
+          --account-name ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }} \
+          --auth-mode key \
+          --account-key $(az storage account keys list --account-name ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }} --resource-group rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} --query '[0].value' -o tsv) \
+          --overwrite
+
+    - name: Restart Function App
+      run: |
+        az functionapp restart \
+          --name func-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
+          --resource-group rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }}

@@ -1,0 +1,21 @@
+# Azure Functions Dependencies
+azure-functions>=1.18.0
+
+# HTTP Requests
+requests>=2.31.0
+
+# Retry Logic (pour US-002)
+tenacity>=8.2.0
+
+# Azure Storage (pour US-005, US-006)
+azure-storage-blob>=12.19.0
+azure-storage-queue>=12.9.0
+azure-storage-file-datalake>=12.14.0
+
+# Monitoring (pour US-016, US-017)
+applicationinsights>=0.11.10
+
+# Development & Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-mock>=3.12.0
