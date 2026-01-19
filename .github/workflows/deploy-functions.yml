@@ -27,6 +27,13 @@ jobs:
       with:
         python-version: '3.11'
 
+    - name: Install dependencies
+      run: |
+        cd functions
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt --target ./.python_packages/lib/site-packages
+        cd ..
+
     - name: Create deployment package
       run: |
         cd functions
@@ -38,8 +45,7 @@ jobs:
         az functionapp deployment source config-zip \
           --name func-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
           --resource-group rg-${{ secrets.TF_VAR_PROJECT_NAME }}-${{ secrets.TF_VAR_ENVIRONMENT }} \
-          --src function-app.zip \
-          --build-remote
+          --src function-app.zip
 
     - name: Restart Function App
       run: |
