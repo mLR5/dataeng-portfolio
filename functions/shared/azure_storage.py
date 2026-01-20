@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
 def upload_to_staging(bronze_data, storage_account_name=STORAGE_ACCOUNT_NAME):
-    ingestion_id = bronze_data['ingestion_metadata']['ingestion_id']
+    ingestion_id = bronze_data['ingestion_id']
     blob_name = f"raw-ingestion/{ingestion_id}.json"
 
     logger.info(f"Uploading to staging: {blob_name}")
