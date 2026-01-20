@@ -21,9 +21,11 @@ def execute_ingestion():
     # Étape 1: Récupérer données API
     logger.info("Step 1: Fetching weather data from API")
     bronze_data = get_all_cities_data(WEATHERAPI_KEY)
-    ingestion_id = bronze_data['ingestion_metadata']['ingestion_id']
-    cities_retrieved = bronze_data['summary']['total_cities_retrieved']
-    cities_failed = bronze_data['summary']['total_cities_failed']
+    ingestion_id = bronze_data['ingestion_id']
+    ingestion_timestamp = bronze_data['ingestion_timestamp']
+    cities_retrieved = bronze_data['summary']['successful']
+    cities_failed = bronze_data['summary']['failed']
+    cities_total = bronze_data['summary']['total_cities']
 
     logger.info(f"Weather data retrieved: {cities_retrieved} cities success, {cities_failed} failed (ID: {ingestion_id})")
 
@@ -34,7 +36,24 @@ def execute_ingestion():
     # Étape 3: Envoyer message queue
     logger.info("Step 3: Sending queue message")
     size_bytes = len(json.dumps(bronze_data, ensure_ascii=False).encode('utf-8'))
-    message_id = send_queue_message(blob_url, ingestion_id, size_bytes, STORAGE_ACCOUNT_NAME, QUEUE_NAME)
+
+    # Parse blob_url to extract container and blob name
+    url_parts = blob_url.split('/')
+    blob_container = url_parts[3]
+    blob_name = '/'.join(url_parts[4:])
+
+    message_id = send_queue_message(
+        blob_url=blob_url,
+        ingestion_id=ingestion_id,
+        size_bytes=size_bytes,
+        ingestion_timestamp=ingestion_timestamp,
+        cities_count=cities_total,
+        blob_container=blob_container,
+        blob_name=blob_name,
+        summary=bronze_data['summary'],
+        storage_account_name=STORAGE_ACCOUNT_NAME,
+        queue_name=QUEUE_NAME
+    )
 
     duration_ms = int((time.time() - start_time) * 1000)
 

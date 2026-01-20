@@ -6,7 +6,7 @@
       "type": "queueTrigger",
       "direction": "in",
       "queueName": "ingestion-weatherapi",
-      "connection": "AzureWebJobsStorage"
+      "connection": "AzureWebJobsSTORAGE_CONNECTION_STRING"
     }
   ]
 }

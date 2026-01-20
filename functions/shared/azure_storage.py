@@ -54,14 +54,20 @@ def upload_to_staging(bronze_data, storage_account_name=STORAGE_ACCOUNT_NAME):
     wait=wait_exponential(multiplier=1, min=1, max=4),
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
-def send_queue_message(blob_url, ingestion_id, size_bytes, storage_account_name=STORAGE_ACCOUNT_NAME, queue_name=QUEUE_NAME):
+def send_queue_message(blob_url, ingestion_id, size_bytes, ingestion_timestamp, cities_count, blob_container, blob_name, summary, storage_account_name=STORAGE_ACCOUNT_NAME, queue_name=QUEUE_NAME):
     logger.info(f"Sending message to queue {queue_name} for ingestion {ingestion_id}")
 
     try:
         message = {
+            "type": "claim_check",
+            "blob_container": blob_container,
+            "blob_name": blob_name,
             "blob_url": blob_url,
             "ingestion_id": ingestion_id,
-            "size_bytes": size_bytes
+            "ingestion_timestamp": ingestion_timestamp,
+            "cities_count": cities_count,
+            "payload_size_bytes": size_bytes,
+            "summary": summary
         }
 
         credential = DefaultAzureCredential()
