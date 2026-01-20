@@ -1,12 +1,11 @@
 # Module pour les opérations Azure Storage
 import json
 import logging
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, BlobClient
 from azure.storage.queue import QueueClient
-from azure.identity import DefaultAzureCredential
 from azure.core.exceptions import AzureError
 from tenacity import retry, stop_after_attempt, wait_exponential, before_sleep_log
-from .config import STORAGE_ACCOUNT_NAME, STAGING_CONTAINER, BRONZE_CONTAINER, QUEUE_NAME, QUEUE_MESSAGE_TTL_SECONDS, BRONZE_PATH_PREFIX
+from .config import STORAGE_CONNECTION_STRING, STAGING_CONTAINER, BRONZE_CONTAINER, QUEUE_NAME, QUEUE_MESSAGE_TTL_SECONDS, BRONZE_PATH_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -17,18 +16,14 @@ logger = logging.getLogger(__name__)
     wait=wait_exponential(multiplier=1, min=1, max=4),
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
-def upload_to_staging(bronze_data, storage_account_name=STORAGE_ACCOUNT_NAME):
+def upload_to_staging(bronze_data):
     ingestion_id = bronze_data['ingestion_id']
     blob_name = f"raw-ingestion/{ingestion_id}.json"
 
     logger.info(f"Uploading to staging: {blob_name}")
 
     try:
-        credential = DefaultAzureCredential()
-        blob_service_client = BlobServiceClient(
-            account_url=f"https://{storage_account_name}.blob.core.windows.net",
-            credential=credential
-        )
+        blob_service_client = BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING)
 
         blob_client = blob_service_client.get_blob_client(
             container=STAGING_CONTAINER,
@@ -54,7 +49,7 @@ def upload_to_staging(bronze_data, storage_account_name=STORAGE_ACCOUNT_NAME):
     wait=wait_exponential(multiplier=1, min=1, max=4),
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
-def send_queue_message(blob_url, ingestion_id, size_bytes, ingestion_timestamp, cities_count, blob_container, blob_name, summary, storage_account_name=STORAGE_ACCOUNT_NAME, queue_name=QUEUE_NAME):
+def send_queue_message(blob_url, ingestion_id, size_bytes, ingestion_timestamp, cities_count, blob_container, blob_name, summary, queue_name=QUEUE_NAME):
     logger.info(f"Sending message to queue {queue_name} for ingestion {ingestion_id}")
 
     try:
@@ -70,12 +65,7 @@ def send_queue_message(blob_url, ingestion_id, size_bytes, ingestion_timestamp, 
             "summary": summary
         }
 
-        credential = DefaultAzureCredential()
-        queue_client = QueueClient(
-            account_url=f"https://{storage_account_name}.queue.core.windows.net",
-            queue_name=queue_name,
-            credential=credential
-        )
+        queue_client = QueueClient.from_connection_string(STORAGE_CONNECTION_STRING, queue_name)
 
         message_content = json.dumps(message, ensure_ascii=False)
         response = queue_client.send_message(message_content, time_to_live=QUEUE_MESSAGE_TTL_SECONDS)
@@ -98,7 +88,7 @@ def send_queue_message(blob_url, ingestion_id, size_bytes, ingestion_timestamp, 
     wait=wait_exponential(multiplier=1, min=1, max=4),
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
-def upload_to_bronze(bronze_data, ingestion_id, storage_account_name=STORAGE_ACCOUNT_NAME):
+def upload_to_bronze(bronze_data, ingestion_id):
     # Parser ingestion_id "20251202_150000" → YYYY/MM/DD/HH
     year = ingestion_id[0:4]
     month = ingestion_id[4:6]
@@ -112,11 +102,7 @@ def upload_to_bronze(bronze_data, ingestion_id, storage_account_name=STORAGE_ACC
     logger.info(f"Uploading to bronze: {blob_name}")
 
     try:
-        credential = DefaultAzureCredential()
-        blob_service_client = BlobServiceClient(
-            account_url=f"https://{storage_account_name}.blob.core.windows.net",
-            credential=credential
-        )
+        blob_service_client = BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING)
 
         blob_client = blob_service_client.get_blob_client(
             container=BRONZE_CONTAINER,
@@ -137,15 +123,20 @@ def upload_to_bronze(bronze_data, ingestion_id, storage_account_name=STORAGE_ACC
 
 
 # Télécharge blob depuis staging
-def download_from_staging(blob_url, storage_account_name=STORAGE_ACCOUNT_NAME):
+def download_from_staging(blob_url):
     logger.info(f"Downloading blob from staging: {blob_url}")
 
     try:
-        credential = DefaultAzureCredential()
-        blob_client = BlobServiceClient(
-            account_url=f"https://{storage_account_name}.blob.core.windows.net",
-            credential=credential
-        ).from_blob_url(blob_url, credential=credential)
+        # Extraire container et blob_name depuis l'URL
+        # Format: https://<account>.blob.core.windows.net/<container>/<blob_name>
+        from urllib.parse import urlparse
+        parsed = urlparse(blob_url)
+        path_parts = parsed.path.lstrip('/').split('/', 1)
+        container_name = path_parts[0]
+        blob_name = path_parts[1] if len(path_parts) > 1 else ''
+
+        blob_service_client = BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING)
+        blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
 
         download_stream = blob_client.download_blob()
         json_data = download_stream.readall().decode('utf-8')
@@ -161,15 +152,19 @@ def download_from_staging(blob_url, storage_account_name=STORAGE_ACCOUNT_NAME):
 
 
 # Supprime blob staging
-def delete_staging_blob(blob_url, storage_account_name=STORAGE_ACCOUNT_NAME):
+def delete_staging_blob(blob_url):
     logger.info(f"Deleting staging blob: {blob_url}")
 
     try:
-        credential = DefaultAzureCredential()
-        blob_client = BlobServiceClient(
-            account_url=f"https://{storage_account_name}.blob.core.windows.net",
-            credential=credential
-        ).from_blob_url(blob_url, credential=credential)
+        # Extraire container et blob_name depuis l'URL
+        from urllib.parse import urlparse
+        parsed = urlparse(blob_url)
+        path_parts = parsed.path.lstrip('/').split('/', 1)
+        container_name = path_parts[0]
+        blob_name = path_parts[1] if len(path_parts) > 1 else ''
+
+        blob_service_client = BlobServiceClient.from_connection_string(STORAGE_CONNECTION_STRING)
+        blob_client = blob_service_client.get_blob_client(container=container_name, blob=blob_name)
 
         blob_client.delete_blob()
 

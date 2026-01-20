@@ -23,6 +23,11 @@ variable "storage_account_name" {
   type        = string
 }
 
+variable "storage_account_id" {
+  description = "Storage account ID for Function App"
+  type        = string
+}
+
 variable "storage_account_access_key" {
   description = "Storage account access key"
   type        = string

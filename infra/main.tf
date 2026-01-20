@@ -72,6 +72,7 @@ module "function_app" {
   location            = azurerm_resource_group.main.location
 
   storage_account_name       = module.storage.name
+  storage_account_id         = module.storage.id
   storage_account_access_key = module.storage.primary_access_key
   storage_connection_string  = module.storage.primary_connection_string
 

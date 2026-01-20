@@ -12,7 +12,7 @@ resource "azurerm_service_plan" "this" {
 # Storage Container for deployment
 resource "azurerm_storage_container" "deployment" {
   name                  = "deploymentpackage"
-  storage_account_name  = var.storage_account_name
+  storage_account_id    = var.storage_account_id
   container_access_type = "private"
 }
 
@@ -43,11 +43,11 @@ resource "azurerm_function_app_flex_consumption" "this" {
 
   app_settings = merge(
     {
-      "AzureWebJobsStorage__accountName"   = var.storage_account_name
-      "AzureWebJobsStorage__queueServiceUri" = "https://${var.storage_account_name}.queue.core.windows.net"
-      "AzureWebJobsStorage__blobServiceUri"  = "https://${var.storage_account_name}.blob.core.windows.net"
-      "AzureWebJobsSTORAGE_CONNECTION_STRING" = var.storage_connection_string
+      # Storage connection string pour AzureWebJobs (Queue Trigger, etc.)
+      "AzureWebJobsStorage"               = var.storage_connection_string
       "AzureWebJobsFeatureFlags"          = "EnableWorkerIndexing"
+
+      # Application settings
       "WEATHERAPI_KEY"                    = "@Microsoft.KeyVault(SecretUri=${var.weatherapi_secret_uri})"
       "STORAGE_ACCOUNT_NAME"              = var.storage_account_name
       "STORAGE_CONNECTION_STRING"         = var.storage_connection_string

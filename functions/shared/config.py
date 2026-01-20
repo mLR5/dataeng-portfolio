@@ -13,6 +13,7 @@ CITIES = ["Paris", "Londres", "Bruxelles"]
 
 # Azure Storage
 STORAGE_ACCOUNT_NAME = os.getenv("STORAGE_ACCOUNT_NAME")
+STORAGE_CONNECTION_STRING = os.getenv("STORAGE_CONNECTION_STRING")
 QUEUE_NAME = os.getenv("QUEUE_NAME", "ingestion-weatherapi")
 STAGING_CONTAINER = os.getenv("STAGING_CONTAINER", "staging")
 BRONZE_CONTAINER = os.getenv("BRONZE_CONTAINER", "bronze")

@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from shared.weather_api import get_all_cities_data
 from shared.azure_storage import upload_to_staging, send_queue_message
-from shared.config import WEATHERAPI_KEY, STORAGE_ACCOUNT_NAME, QUEUE_NAME
+from shared.config import WEATHERAPI_KEY, QUEUE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ def execute_ingestion():
 
     # Étape 2: Upload vers staging blob
     logger.info("Step 2: Uploading to staging blob")
-    blob_url = upload_to_staging(bronze_data, STORAGE_ACCOUNT_NAME)
+    blob_url = upload_to_staging(bronze_data)
 
     # Étape 3: Envoyer message queue
     logger.info("Step 3: Sending queue message")
@@ -51,7 +51,6 @@ def execute_ingestion():
         blob_container=blob_container,
         blob_name=blob_name,
         summary=bronze_data['summary'],
-        storage_account_name=STORAGE_ACCOUNT_NAME,
         queue_name=QUEUE_NAME
     )
 

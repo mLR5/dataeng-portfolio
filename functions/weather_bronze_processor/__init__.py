@@ -8,7 +8,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from shared.azure_storage import download_from_staging, upload_to_bronze, delete_staging_blob
-from shared.config import STORAGE_ACCOUNT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -31,15 +30,15 @@ def main(msg: func.QueueMessage) -> None:
 
         # Étape 1: Télécharger blob depuis staging
         logger.info("Step 1: Downloading blob from staging")
-        bronze_data = download_from_staging(blob_url, STORAGE_ACCOUNT_NAME)
+        bronze_data = download_from_staging(blob_url)
 
         # Étape 2: Upload vers bronze layer
         logger.info("Step 2: Uploading to bronze layer")
-        bronze_url = upload_to_bronze(bronze_data, ingestion_id, STORAGE_ACCOUNT_NAME)
+        bronze_url = upload_to_bronze(bronze_data, ingestion_id)
 
         # Étape 3: Supprimer blob staging
         logger.info("Step 3: Deleting staging blob")
-        delete_staging_blob(blob_url, STORAGE_ACCOUNT_NAME)
+        delete_staging_blob(blob_url)
 
         duration_ms = int((time.time() - start_time) * 1000)
 
