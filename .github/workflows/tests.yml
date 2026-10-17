@@ -24,4 +24,4 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Test ingestion without external services
-        run: python -m pytest --cov=shared.weather_api --cov=shared.config --cov=weather_ingestion_trigger --cov=manual_weather_trigger --cov-report=term-missing
+        run: python -m pytest --cov=shared --cov=weather_ingestion_trigger --cov=manual_weather_trigger --cov=weather_bronze_processor --cov-report=term-missing

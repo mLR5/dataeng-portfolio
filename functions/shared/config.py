@@ -19,11 +19,14 @@ STAGING_CONTAINER = os.getenv("STAGING_CONTAINER", "staging")
 BRONZE_CONTAINER = os.getenv("BRONZE_CONTAINER", "bronze")
 DATALAKE_CONTAINER = os.getenv("DATALAKE_CONTAINER", "datalake")
 BRONZE_PATH_PREFIX = "weather/weatherapi"
+STAGING_PATH_PREFIX = "raw-ingestion/"
 
 # Retry
 RETRY_MAX_ATTEMPTS = 3
 RETRY_MIN_WAIT_SECONDS = 1
 RETRY_MAX_WAIT_SECONDS = 4
+# Au-delà, un Retry-After n'est pas attendu : la ville est marquée en échec.
+RETRY_AFTER_MAX_SECONDS = 30
 
 # Queue
 QUEUE_MESSAGE_TTL_SECONDS = 604800  # 7 jours

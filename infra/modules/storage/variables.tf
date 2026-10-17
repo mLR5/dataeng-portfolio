@@ -91,6 +91,11 @@ variable "cross_tenant_replication_enabled" {
   default     = false
 }
 
+variable "queue_name" {
+  description = "Name of the ingestion queue (Claim Check messages)"
+  type        = string
+}
+
 variable "tags" {
   description = "Tags to apply to the storage account"
   type        = map(string)

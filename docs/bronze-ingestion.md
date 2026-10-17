@@ -41,7 +41,56 @@ Trois tentatives au maximum pour les timeouts, erreurs de connexion et codes
 429, 500, 502, 503 et 504. Les autres erreurs HTTP ne sont pas retentées.
 L'attente exponentielle est de 1 puis 2 secondes ; un `Retry-After` valide
 (secondes ou date HTTP) impose une attente au moins égale au délai annoncé.
+Un `Retry-After` supérieur à 30 secondes n'est pas attendu : la ville est
+immédiatement marquée en échec, pour ne pas bloquer la Function jusqu'à son timeout.
 Les logs de retry n'incluent pas l'URL de la requête, qui contient la clé API.
+
+## Contrat des messages (version 1)
+
+La collecte publie un message Claim Check par exécution dans la queue
+configurée par `QUEUE_NAME`. Terraform définit ce nom une seule fois, dans le
+module storage, et le transmet à la Function App ; le binding du consommateur
+le lit via `%QUEUE_NAME%`.
+
+| Champ | Description |
+| --- | --- |
+| `type` | Toujours `claim_check` |
+| `schema_version` | `1` |
+| `ingestion_id` | `YYYYMMDD_HHMMSS_<uuid4>` (ou `YYYYMMDD_HHMMSS` pour les anciennes collectes) |
+| `ingestion_timestamp` | Horodatage ISO UTC, source de la partition Bronze |
+| `status` | `success`, `partial` ou `failed` |
+| `blob_container`, `blob_name` | Toujours `staging` et `raw-ingestion/<ingestion_id>.json` |
+| `blob_url` | URL du blob staging, informative |
+| `payload_size_bytes` | Taille exacte du blob staging écrit |
+| `cities_count`, `summary` | Nombre de villes et décompte succès/échecs |
+
+Le consommateur accepte aussi les messages publiés avant la version 1 (sans
+`schema_version`, taille éventuellement nommée `size_bytes`). Un message
+illisible, d'une autre version ou pointant ailleurs que le blob staging attendu
+est refusé sans aucun accès au stockage ; après les tentatives prévues, il part
+dans la poison queue. Cette vérification empêche un message forgé de faire lire
+ou supprimer un autre blob.
+
+## Traitement Bronze rejouable
+
+Le chemin Bronze est déterministe (partition horaire + `ingestion_id`). Le
+consommateur peut donc recevoir plusieurs fois le même message sans doublon :
+
+1. Si le blob Bronze existe déjà, il n'est ni relu ni réécrit.
+2. Sinon le blob staging est téléchargé et son `ingestion_id` comparé à celui
+   du message, puis écrit en Bronze sans écrasement. Si un traitement parallèle
+   l'a écrit entre-temps, la version existante est conservée.
+3. Le staging n'est supprimé qu'une fois Bronze présent. Un staging déjà
+   supprimé n'est pas une erreur. Un échec de suppression est journalisé sans
+   faire échouer le message : la lifecycle policy purge le staging après 7 jours.
+
+| Situation | Résultat |
+| --- | --- |
+| Première livraison | Bronze écrit, staging supprimé |
+| Message rejoué après traitement complet | Aucune écriture |
+| Arrêt entre l'écriture Bronze et le nettoyage | Seul le staging est supprimé |
+| Staging et Bronze absents | Échec, le message est retenté puis part en poison queue |
+| Staging d'une autre ingestion | Échec sans écriture ni suppression |
 
 ## Tests locaux et CI
 
@@ -60,5 +109,5 @@ Le workflow `Tests ingestion` exécute les tests sur les PR et les pushes sur ma
 Les dépendances de test sont séparées du fichier déployé avec les Functions.
 
 Cette suite vérifie la logique Python ; elle ne remplace pas un test d'intégration
-sur une Function App Azure. L'idempotence du consommateur, le contrat des messages
-et les procédures de reprise appartiennent aux lots Bronze suivants.
+sur une Function App Azure. La remise en queue des collectes échouées, la reprise
+de la poison queue et les alertes appartiennent au lot Bronze suivant.

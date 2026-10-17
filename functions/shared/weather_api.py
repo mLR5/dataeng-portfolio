@@ -5,11 +5,11 @@ import logging
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from uuid import uuid4
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from .config import (
     WEATHERAPI_FORECAST_ENDPOINT, DEFAULT_FORECAST_DAYS, DEFAULT_LANG,
     API_TIMEOUT_SECONDS, CITIES, RETRY_MAX_ATTEMPTS,
-    RETRY_MIN_WAIT_SECONDS, RETRY_MAX_WAIT_SECONDS,
+    RETRY_MIN_WAIT_SECONDS, RETRY_MAX_WAIT_SECONDS, RETRY_AFTER_MAX_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,13 @@ def _retry_after_seconds(value):
             return None
 
 
+def _is_retryable(error):
+    if isinstance(error, TransientWeatherAPIError):
+        # Un Retry-After trop long bloquerait la Function jusqu'à son timeout.
+        return error.retry_after is None or error.retry_after <= RETRY_AFTER_MAX_SECONDS
+    return isinstance(error, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
+
+
 def _wait_for_retry(retry_state):
     backoff = wait_exponential(
         multiplier=1, min=RETRY_MIN_WAIT_SECONDS, max=RETRY_MAX_WAIT_SECONDS,
@@ -62,10 +69,7 @@ def _log_retry(retry_state):
 @retry(
     stop=stop_after_attempt(RETRY_MAX_ATTEMPTS),
     wait=_wait_for_retry,
-    retry=retry_if_exception_type((
-        requests.exceptions.Timeout, requests.exceptions.ConnectionError,
-        TransientWeatherAPIError,
-    )),
+    retry=retry_if_exception(_is_retryable),
     before_sleep=_log_retry,
     reraise=True,
 )
@@ -81,6 +85,11 @@ def _call_api(city_name, api_key, days, lang):
             _retry_after_seconds(response.headers.get("Retry-After")),
         )
         response.close()
+        if not _is_retryable(error):
+            logger.warning(
+                "WeatherAPI Retry-After of %ss for %s exceeds %ss, not retrying",
+                error.retry_after, city_name, RETRY_AFTER_MAX_SECONDS,
+            )
         raise error
     return response
 

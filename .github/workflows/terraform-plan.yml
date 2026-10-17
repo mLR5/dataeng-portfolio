@@ -1,0 +1,52 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    paths:
+      - 'infra/**'
+      - '.github/workflows/terraform-plan.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_wrapper: false
+
+    - name: Terraform Init
+      working-directory: ./infra
+      run: |
+        terraform init -input=false \
+          -backend-config="resource_group_name=${{ secrets.TF_BACKEND_RESOURCE_GROUP }}" \
+          -backend-config="storage_account_name=${{ secrets.TF_BACKEND_STORAGE_ACCOUNT }}"
+
+    - name: Terraform Validate
+      working-directory: ./infra
+      run: terraform validate
+
+    # Lecture seule : aucune ressource n'est modifiée.
+    - name: Terraform Plan
+      working-directory: ./infra
+      run: terraform plan -input=false -lock-timeout=5m -detailed-exitcode || [ $? -eq 2 ]
+      env:
+        TF_VAR_subscription_id: ${{ secrets.TF_VAR_SUBSCRIPTION_ID }}
+        TF_VAR_project_name: ${{ secrets.TF_VAR_PROJECT_NAME }}
+        TF_VAR_environment: ${{ secrets.TF_VAR_ENVIRONMENT }}
+        TF_VAR_location: ${{ secrets.TF_VAR_LOCATION }}
+        TF_VAR_storage_account_name: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
