@@ -103,3 +103,24 @@ def test_invalid_json_is_a_city_failure(http_get, response, retry_sleep):
     assert weather_api.get_weather_data("Paris", "test-key")["status"] == "error"
     assert http_get.call_count == 1
     retry_sleep.assert_not_called()
+
+
+def test_retry_after_at_limit_is_respected(http_get, response, retry_sleep):
+    http_get.side_effect = [response(429, {"Retry-After": "30"}), response()]
+    assert weather_api.get_weather_data("Paris", "test-key")["status"] == "success"
+    retry_sleep.assert_called_once_with(30)
+
+
+@pytest.mark.parametrize("header", ["31", "3600", "Sun, 18 Oct 2026 12:00:00 GMT"])
+def test_retry_after_beyond_limit_fails_city_without_waiting(monkeypatch, http_get, response, retry_sleep, caplog, header):
+    class FrozenClock:
+        @staticmethod
+        def now(tz):
+            return datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(weather_api, "datetime", FrozenClock)
+    http_get.side_effect = None
+    http_get.return_value = response(429, {"Retry-After": header})
+    assert weather_api.get_weather_data("Paris", "test-key")["status"] == "error"
+    assert http_get.call_count == 1
+    retry_sleep.assert_not_called()
+    assert "not retrying" in caplog.text

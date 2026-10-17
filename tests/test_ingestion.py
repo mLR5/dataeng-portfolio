@@ -3,7 +3,7 @@ import json
 import azure.functions as func
 import pytest
 
-from shared import config
+from shared import claim_check, config
 import manual_weather_trigger
 import weather_ingestion_trigger
 
@@ -23,7 +23,20 @@ def test_ingestion_archives_every_outcome(http_get, response, ingestion_io, code
     assert archived["status"] == expected
     assert len(archived["cities"]) == 3
     ingestion_io.send.assert_called_once()
-    assert ingestion_io.send.call_args.kwargs["ingestion_id"] == result["ingestion_id"]
+    message = ingestion_io.send.call_args.args[0]
+    assert message["ingestion_id"] == result["ingestion_id"]
+    assert message["status"] == expected
+    assert message["payload_size_bytes"] == 1234
+
+
+def test_published_message_is_accepted_by_bronze_consumer(http_get, response, ingestion_io):
+    http_get.side_effect = [response() for _ in range(3)]
+    weather_ingestion_trigger.execute_ingestion()
+    published = json.dumps(ingestion_io.send.call_args.args[0])
+    message = claim_check.parse_message(published.encode("utf-8"))
+    assert message["schema_version"] == claim_check.SCHEMA_VERSION
+    assert message["blob_container"] == "staging"
+    assert message["blob_name"] == f"raw-ingestion/{message['ingestion_id']}.json"
 
 
 def test_invalid_configuration_stops_before_external_calls(monkeypatch, http_get, ingestion_io):

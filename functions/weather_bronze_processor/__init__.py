@@ -1,49 +1,85 @@
 import azure.functions as func
 import logging
-import json
 import time
 import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from shared.azure_storage import download_from_staging, upload_to_bronze, delete_staging_blob
+from shared.azure_storage import (
+    bronze_blob_exists, download_staging_blob, upload_to_bronze, delete_staging_blob,
+)
+from shared.claim_check import InvalidMessageError, bronze_blob_name, parse_message
 
 logger = logging.getLogger(__name__)
+
+
+class StagingContentMismatchError(Exception):
+    """Le blob staging ne correspond pas à l'ingestion annoncée par le message."""
+
+
+def process_claim_check(message):
+    """Promeut un blob staging vers Bronze. Rejouable : un message déjà traité ne produit rien de plus."""
+    ingestion_id = message['ingestion_id']
+    staging_name = message['blob_name']
+    bronze_name = bronze_blob_name(ingestion_id, message['ingestion_timestamp'])
+
+    # Étape 1: Reconnaître un Bronze déjà produit (message rejoué ou dupliqué)
+    if bronze_blob_exists(bronze_name):
+        logger.info(f"Step 1: Bronze already produced, skipping upload: {bronze_name}")
+        bronze_created = False
+    else:
+        # Étape 2: Télécharger le staging et vérifier qu'il correspond au message
+        logger.info("Step 2: Downloading blob from staging")
+        bronze_data = download_staging_blob(staging_name)
+        if bronze_data.get('ingestion_id') != ingestion_id:
+            raise StagingContentMismatchError(
+                f"Staging blob {staging_name} contains ingestion {bronze_data.get('ingestion_id')!r}"
+            )
+
+        # Étape 3: Upload vers Bronze sans écraser
+        logger.info("Step 3: Uploading to bronze layer")
+        _, bronze_created = upload_to_bronze(bronze_data, bronze_name)
+
+    # Étape 4: Nettoyer le staging, uniquement une fois Bronze présent.
+    # Un échec ici n'invalide pas Bronze : la lifecycle policy purge le staging après 7 jours.
+    try:
+        staging_deleted = delete_staging_blob(staging_name)
+    except Exception as e:
+        logger.warning(f"Staging cleanup failed, left to lifecycle policy: {staging_name} ({type(e).__name__})")
+        staging_deleted = False
+
+    return {
+        "ingestion_id": ingestion_id,
+        "bronze_blob": bronze_name,
+        "bronze_created": bronze_created,
+        "staging_deleted": staging_deleted,
+    }
 
 
 def main(msg: func.QueueMessage) -> None:
     start_time = time.time()
     logger.info("=== Bronze Processor Queue Trigger Started ===")
+    logger.info(f"Message ID: {msg.id}, Dequeue count: {msg.dequeue_count}")
 
     try:
-        # Parser message JSON
-        message_body = msg.get_body().decode('utf-8')
-        message_data = json.loads(message_body)
+        message = parse_message(msg.get_body())
+        logger.info(
+            f"Processing ingestion {message['ingestion_id']} "
+            f"(status: {message.get('status', 'unknown')}, size: {message['payload_size_bytes']} bytes)"
+        )
 
-        blob_url = message_data['blob_url']
-        ingestion_id = message_data['ingestion_id']
-        size_bytes = message_data.get('size_bytes', 0)
-
-        logger.info(f"Processing ingestion {ingestion_id} (size: {size_bytes} bytes)")
-        logger.info(f"Message ID: {msg.id}, Dequeue count: {msg.dequeue_count}")
-
-        # Étape 1: Télécharger blob depuis staging
-        logger.info("Step 1: Downloading blob from staging")
-        bronze_data = download_from_staging(blob_url)
-
-        # Étape 2: Upload vers bronze layer
-        logger.info("Step 2: Uploading to bronze layer")
-        bronze_url = upload_to_bronze(bronze_data, ingestion_id)
-
-        # Étape 3: Supprimer blob staging
-        logger.info("Step 3: Deleting staging blob")
-        delete_staging_blob(blob_url)
+        result = process_claim_check(message)
 
         duration_ms = int((time.time() - start_time) * 1000)
+        outcome = "Completed" if result['bronze_created'] else "Already Processed"
+        logger.info(f"=== Bronze Processing {outcome} ({duration_ms}ms) ===")
+        logger.info(f"Bronze blob: {result['bronze_blob']}")
 
-        logger.info(f"=== Bronze Processing Completed Successfully ({duration_ms}ms) ===")
-        logger.info(f"Bronze URL: {bronze_url}")
+    except InvalidMessageError as e:
+        # Rejouer ne corrigera pas le message : il finira dans la poison queue pour analyse.
+        logger.error(f"=== Invalid Claim Check Message: {e} ===")
+        raise
 
     except Exception as e:
         duration_ms = int((time.time() - start_time) * 1000)

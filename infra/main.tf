@@ -36,6 +36,7 @@ module "storage" {
   account_tier             = var.storage_account_tier
   account_replication_type = var.storage_replication_type
   enable_hns               = var.enable_data_lake_gen2
+  queue_name               = "ingestion-weatherapi"
 
   tags = var.tags
 }
@@ -80,7 +81,7 @@ module "function_app" {
   application_insights_connection_string = module.application_insights.connection_string
 
   weatherapi_secret_uri = "${module.keyvault.vault_uri}secrets/weather-api-key"
-  queue_name            = "ingestion-weatherapi"
+  queue_name            = module.storage.queue_name
   datalake_container    = "datalake"
 
   tags = var.tags

@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 import requests
 
-from shared import azure_storage, config, weather_api
+from shared import azure_storage, claim_check, config, weather_api
 import weather_ingestion_trigger
 
 
@@ -57,7 +57,15 @@ def response():
 
 @pytest.fixture
 def ingestion_io(monkeypatch):
-    upload = Mock(return_value="https://test.blob.core.windows.net/staging/raw-ingestion/test.json")
+    def staged(data):
+        blob_name = claim_check.staging_blob_name(data["ingestion_id"])
+        return {
+            "container": "staging",
+            "blob_name": blob_name,
+            "url": f"https://test.blob.core.windows.net/staging/{blob_name}",
+            "size_bytes": 1234,
+        }
+    upload = Mock(side_effect=staged)
     send = Mock(return_value="test-message")
     monkeypatch.setattr(weather_ingestion_trigger, "upload_to_staging", upload)
     monkeypatch.setattr(weather_ingestion_trigger, "send_queue_message", send)

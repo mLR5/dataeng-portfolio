@@ -51,7 +51,7 @@ resource "azurerm_storage_data_lake_gen2_filesystem" "datalake" {
 }
 
 resource "azurerm_storage_queue" "ingestion_weatherapi" {
-  name               = "ingestion-weatherapi"
+  name               = var.queue_name
   storage_account_id = azurerm_storage_account.this.id
 }
 
