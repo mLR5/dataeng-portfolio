@@ -1,0 +1,47 @@
+name: Validate Azure Bronze
+
+on:
+  push:
+    branches: [validation/azure-bronze]
+    paths:
+      - '.github/workflows/validate-bronze-azure.yml'
+      - 'scripts/validate_bronze_azure.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-azure-bronze-dev
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Trigger one ingestion and verify Bronze
+        env:
+          AZURE_PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
+          AZURE_ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+        run: python scripts/validate_bronze_azure.py
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: azure-bronze-validation
+          path: validation-report.json
+          if-no-files-found: warn
+          retention-days: 14
