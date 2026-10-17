@@ -51,3 +51,15 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "bronze_monitoring_enabled" {
+  description = "Create Bronze log alerts (Azure Monitor pricing applies). The timer still emits health traces."
+  type        = bool
+  default     = true
+}
+
+variable "bronze_alert_action_group_ids" {
+  description = "Existing Azure Monitor action group IDs. Empty: alerts are visible in Azure, without external notifications."
+  type        = list(string)
+  default     = []
+}
