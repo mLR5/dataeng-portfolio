@@ -27,3 +27,25 @@ RETRY_MAX_WAIT_SECONDS = 4
 
 # Queue
 QUEUE_MESSAGE_TTL_SECONDS = 604800  # 7 jours
+
+
+class ConfigurationError(ValueError):
+    """Configuration invalide, sans exposer les valeurs des secrets."""
+
+
+def validate_configuration():
+    """Valide la configuration avant tout appel API ou stockage."""
+    required = {
+        "WEATHERAPI_KEY": WEATHERAPI_KEY,
+        "STORAGE_CONNECTION_STRING": STORAGE_CONNECTION_STRING,
+        "QUEUE_NAME": QUEUE_NAME,
+        "STAGING_CONTAINER": STAGING_CONTAINER,
+        "BRONZE_CONTAINER": BRONZE_CONTAINER,
+    }
+    missing = [name for name, value in required.items() if not value or not value.strip()]
+    if missing:
+        raise ConfigurationError("Missing required settings: " + ", ".join(missing))
+    if WEATHERAPI_KEY.startswith("@Microsoft.KeyVault("):
+        raise ConfigurationError("WEATHERAPI_KEY Key Vault reference is unresolved")
+    if not CITIES or any(not isinstance(city, str) or not city.strip() for city in CITIES):
+        raise ConfigurationError("CITIES must contain at least one non-empty city")

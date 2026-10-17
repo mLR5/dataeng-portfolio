@@ -17,11 +17,17 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     try:
         summary = execute_ingestion()
 
-        logger.info(f"=== Ingestion Completed Successfully ({summary['duration_ms']}ms) ===")
+        if summary['status'] == 'failed':
+            log = logger.error
+        elif summary['status'] == 'partial':
+            log = logger.warning
+        else:
+            log = logger.info
+        log(f"=== Ingestion Completed: {summary['status']} ({summary['duration_ms']}ms) ===")
 
         return func.HttpResponse(
             body=json.dumps(summary, indent=2, ensure_ascii=False),
-            status_code=200,
+            status_code=503 if summary['status'] == 'failed' else 200,
             mimetype="application/json"
         )
 
@@ -30,7 +36,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logger.error(f"Error: {str(e)}", exc_info=True)
 
         error_response = {
-            "status": "error",
+            "status": "failed",
             "error": str(e),
             "error_type": type(e).__name__
         }
