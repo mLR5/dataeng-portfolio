@@ -77,9 +77,15 @@ Le chemin Bronze est déterministe (partition horaire + `ingestion_id`). Le
 consommateur peut donc recevoir plusieurs fois le même message sans doublon :
 
 1. Si le blob Bronze existe déjà, il n'est ni relu ni réécrit.
-2. Sinon le blob staging est téléchargé et son `ingestion_id` comparé à celui
-   du message, puis écrit en Bronze sans écrasement. Si un traitement parallèle
-   l'a écrit entre-temps, la version existante est conservée.
+2. Sinon le blob staging est téléchargé. Son `ingestion_id` et son horodatage,
+   normalisé en UTC, doivent correspondre au message avant toute écriture ou
+   suppression. Un horodatage absent, invalide ou différent est refusé ; deux
+   représentations du même instant sont acceptées, y compris les anciens
+   horodatages UTC sans fuseau. Le blob est ensuite écrit en Bronze sans
+   écrasement. Si un traitement parallèle l'a écrit entre-temps, la version
+   existante est conservée. Si le staging disparaît avant son téléchargement,
+   le consommateur revérifie Bronze : sa présence confirme qu'un autre
+   consommateur a terminé ; sinon l'échec reste signalé pour une nouvelle tentative.
 3. Le staging n'est supprimé qu'une fois Bronze présent. Un staging déjà
    supprimé n'est pas une erreur. Un échec de suppression est journalisé sans
    faire échouer le message : la lifecycle policy purge le staging après 7 jours.
@@ -91,6 +97,8 @@ consommateur peut donc recevoir plusieurs fois le même message sans doublon :
 | Arrêt entre l'écriture Bronze et le nettoyage | Seul le staging est supprimé |
 | Staging et Bronze absents | Échec, le message est retenté puis part en poison queue |
 | Staging d'une autre ingestion | Échec sans écriture ni suppression |
+| Horodatage staging incohérent avec le message | Échec sans écriture ni suppression |
+| Un consommateur termine avant la lecture staging d'un autre | Bronze reconnu après un second contrôle, sans nouvelle écriture |
 
 ## Tests locaux et CI
 
