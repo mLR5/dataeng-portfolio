@@ -14,8 +14,6 @@ env/
 ENV/
 .venv
 
-.env.example
-
 # Jupyter Notebook
 .ipynb_checkpoints
 notebooks/
@@ -36,5 +34,9 @@ local.settings.json
 
 # Project planning
 plan/
-docs/
-tests/
+
+# Test reports
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml

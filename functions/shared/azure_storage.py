@@ -1,6 +1,7 @@
 # Module pour les opérations Azure Storage
 import json
 import logging
+from datetime import datetime, timezone
 from azure.storage.blob import BlobServiceClient, BlobClient
 from azure.storage.queue import QueueClient
 from azure.core.exceptions import AzureError
@@ -89,13 +90,12 @@ def send_queue_message(blob_url, ingestion_id, size_bytes, ingestion_timestamp, 
     before_sleep=before_sleep_log(logger, logging.WARNING)
 )
 def upload_to_bronze(bronze_data, ingestion_id):
-    # Parser ingestion_id "20251202_150000" → YYYY/MM/DD/HH
-    year = ingestion_id[0:4]
-    month = ingestion_id[4:6]
-    day = ingestion_id[6:8]
-    hour = ingestion_id[9:11]
-
-    directory_path = f"{BRONZE_PATH_PREFIX}/{year}/{month}/{day}/{hour}"
+    # Les anciens timestamps sans fuseau étaient déjà produits en UTC.
+    ingestion_time = datetime.fromisoformat(bronze_data['ingestion_timestamp'].replace('Z', '+00:00'))
+    if ingestion_time.tzinfo is None:
+        ingestion_time = ingestion_time.replace(tzinfo=timezone.utc)
+    ingestion_time = ingestion_time.astimezone(timezone.utc)
+    directory_path = f"{BRONZE_PATH_PREFIX}/{ingestion_time:%Y/%m/%d/%H}"
     file_name = f"{ingestion_id}_weather_data.json"
     blob_name = f"{directory_path}/{file_name}"
 

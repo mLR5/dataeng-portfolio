@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from shared.weather_api import get_all_cities_data
 from shared.azure_storage import upload_to_staging, send_queue_message
-from shared.config import WEATHERAPI_KEY, QUEUE_NAME
+from shared import config
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +17,11 @@ logger = logging.getLogger(__name__)
 def execute_ingestion():
     """Exécute le workflow d'ingestion complet: API → Blob → Queue"""
     start_time = time.time()
+    config.validate_configuration()
 
     # Étape 1: Récupérer données API
     logger.info("Step 1: Fetching weather data from API")
-    bronze_data = get_all_cities_data(WEATHERAPI_KEY)
+    bronze_data = get_all_cities_data(config.WEATHERAPI_KEY)
     ingestion_id = bronze_data['ingestion_id']
     ingestion_timestamp = bronze_data['ingestion_timestamp']
     cities_retrieved = bronze_data['summary']['successful']
@@ -51,13 +52,13 @@ def execute_ingestion():
         blob_container=blob_container,
         blob_name=blob_name,
         summary=bronze_data['summary'],
-        queue_name=QUEUE_NAME
+        queue_name=config.QUEUE_NAME
     )
 
     duration_ms = int((time.time() - start_time) * 1000)
 
     return {
-        "status": "success",
+        "status": bronze_data['status'],
         "ingestion_id": ingestion_id,
         "cities_retrieved": cities_retrieved,
         "cities_failed": cities_failed,
@@ -72,7 +73,10 @@ def main(timer: func.TimerRequest) -> None:
 
     try:
         summary = execute_ingestion()
-        logger.info(f"=== Ingestion Completed Successfully ({summary['duration_ms']}ms) ===")
+        if summary['status'] == 'failed':
+            raise RuntimeError(f"Weather ingestion failed: no cities retrieved (ID: {summary['ingestion_id']})")
+        log = logger.warning if summary['status'] == 'partial' else logger.info
+        log(f"=== Ingestion Completed: {summary['status']} ({summary['duration_ms']}ms) ===")
         logger.info(f"Summary: {json.dumps(summary, indent=2)}")
 
     except Exception as e:
