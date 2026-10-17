@@ -49,16 +49,16 @@ def az_json(args):
 def storage_json(args, account):
     global STORAGE_AUTH
     result = run_az(["storage", "blob", *args, "--account-name", account, "--auth-mode", STORAGE_AUTH])
-    if result.returncode and STORAGE_AUTH == "login" and any(
-        marker in result.stderr for marker in ("AuthorizationPermissionMismatch", "AuthorizationFailure", "403")
-    ):
+    if result.returncode and STORAGE_AUTH == "login":
         # Same deployment identity; Azure CLI resolves an account key through ARM.
         # No key is read into this script or printed.
         STORAGE_AUTH = "key"
         REPORT["storage_authentication"] = "Azure CLI account-key lookup using deployment identity"
         result = run_az(["storage", "blob", *args, "--account-name", account, "--auth-mode", STORAGE_AUTH])
     if result.returncode:
-        raise ValidationError("Storage verification failed for " + args[0])
+        codes = re.findall(r"(?:ErrorCode:|ERROR: \()\s*([A-Za-z][A-Za-z0-9]+)", result.stderr)
+        detail = ", ".join(codes) or "Azure CLI returned a non-zero exit status"
+        raise ValidationError(f"Storage verification failed for {args[0]} using {STORAGE_AUTH}: {detail}")
     return json.loads(result.stdout)
 
 
@@ -106,35 +106,44 @@ def validate():
     REPORT["indexed_functions"] = sorted(indexed & expected)
     check("function_indexing", expected <= indexed, f"{len(indexed & expected)}/3 expected functions indexed")
 
-    keys = az_json(["functionapp", "function", "keys", "list", *app_args, "--function-name", "manual_weather_trigger"])
-    key = keys.get("default")
-    check("function_authentication", isinstance(key, str) and bool(key), "Function-scoped default key available; value omitted")
-    request = Request(
-        f"https://{properties['defaultHostName']}/api/weather/ingest",
-        data=b"{}", method="POST",
-        headers={"x-functions-key": key, "Content-Type": "application/json"},
-    )
-    # Exactly one invocation: retrying a POST could create a second ingestion.
-    try:
-        with urlopen(request, timeout=180) as result:
-            http_status, body = result.status, result.read()
-    except HTTPError as error:
-        http_status, body = error.code, error.read()
-    except URLError:
-        raise ValidationError("Cannot reach the ingestion endpoint") from None
-    finally:
-        key = None
-        keys = None
+    reference = os.environ.get("VALIDATION_REFERENCE")
+    if reference:
+        previous = json.loads(Path(reference).read_text(encoding="utf-8"))
+        http_status = previous["http_status"]
+        summary = previous["summary"]
+        summary["blob_url"] = f"https://{account}.blob.core.windows.net/staging/raw-ingestion/{summary['ingestion_id']}.json"
+        REPORT["reference_run"] = previous["run_url"]
+        print("Resuming verification of the existing ingestion; no HTTP invocation", flush=True)
+    else:
+        keys = az_json(["functionapp", "function", "keys", "list", *app_args, "--function-name", "manual_weather_trigger"])
+        key = keys.get("default")
+        check("function_authentication", isinstance(key, str) and bool(key), "Function-scoped default key available; value omitted")
+        request = Request(
+            f"https://{properties['defaultHostName']}/api/weather/ingest",
+            data=b"{}", method="POST",
+            headers={"x-functions-key": key, "Content-Type": "application/json"},
+        )
+        # Exactly one invocation: retrying a POST could create a second ingestion.
+        try:
+            with urlopen(request, timeout=180) as result:
+                http_status, body = result.status, result.read()
+        except HTTPError as error:
+            http_status, body = error.code, error.read()
+        except URLError:
+            raise ValidationError("Cannot reach the ingestion endpoint") from None
+        finally:
+            key = None
+            keys = None
+        try:
+            summary = json.loads(body)
+        except (ValueError, UnicodeDecodeError):
+            raise ValidationError(f"Ingestion returned HTTP {http_status} without a JSON result") from None
     REPORT["http_status"] = http_status
-    try:
-        summary = json.loads(body)
-    except (ValueError, UnicodeDecodeError):
-        raise ValidationError(f"Ingestion returned HTTP {http_status} without a JSON result") from None
     REPORT["collection_status"] = summary.get("status")
     REPORT["cities_retrieved"] = summary.get("cities_retrieved")
     REPORT["cities_failed"] = summary.get("cities_failed")
     ingestion_id = summary.get("ingestion_id", "")
-    check("ingestion_response", isinstance(ingestion_id, str) and bool(re.fullmatch(r"\d{8}_\d{6}(?:_[0-9a-f]{32})?", ingestion_id)), f"HTTP {http_status}; ingestion identifier present")
+    check("ingestion_response", isinstance(ingestion_id, str) and bool(re.fullmatch(r"\d{8}_\d{6}(?:_[0-9a-f]{32})?", ingestion_id)), f"HTTP {http_status}; ingestion {ingestion_id}")
     REPORT["ingestion_id"] = ingestion_id
     check("queue_publication", bool(summary.get("queue_message_id")), "Ingestion returned a queue message identifier")
     REPORT["queue_message_id"] = summary["queue_message_id"]
