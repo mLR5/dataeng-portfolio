@@ -95,7 +95,11 @@ def validate():
     app_args = ["--resource-group", resource_group, "--name", app]
 
     app_info = az_json(["functionapp", "show", *app_args])
-    check("function_app_running", app_info.get("state") == "Running", "Function App state is Running")
+    properties = app_info.get("properties", app_info)
+    state = properties.get("state")
+    REPORT["function_app_state"] = state
+    REPORT["function_app_enabled"] = properties.get("enabled")
+    check("function_app_running", isinstance(state, str) and state.lower() == "running", f"Observed Function App state: {state!r}")
     functions = az_json(["functionapp", "function", "list", *app_args])
     indexed = {item["name"].rsplit("/", 1)[-1] for item in functions}
     expected = {"manual_weather_trigger", "weather_ingestion_trigger", "weather_bronze_processor"}
@@ -106,7 +110,7 @@ def validate():
     key = keys.get("default")
     check("function_authentication", isinstance(key, str) and bool(key), "Function-scoped default key available; value omitted")
     request = Request(
-        f"https://{app_info['defaultHostName']}/api/weather/ingest",
+        f"https://{properties['defaultHostName']}/api/weather/ingest",
         data=b"{}", method="POST",
         headers={"x-functions-key": key, "Content-Type": "application/json"},
     )
