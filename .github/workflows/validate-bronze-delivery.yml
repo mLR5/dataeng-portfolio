@@ -1,0 +1,53 @@
+name: Validate Bronze Delivery
+
+on:
+  push:
+    branches: [validation/bronze-delivery]
+    paths:
+      - '.github/workflows/validate-bronze-delivery.yml'
+      - 'scripts/validate_bronze_azure.py'
+      - 'scripts/validate_bronze_delivery.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-azure-bronze-dev
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install project SDKs
+        run: python -m pip install -r functions/requirements.txt
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Validate deployed Bronze end to end
+        env:
+          AZURE_PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
+          AZURE_ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+          VALIDATED_COMMIT: '9858de3c97810a2a68194470f50a010d3e161e41'
+        run: python scripts/validate_bronze_delivery.py
+      - name: Upload delivery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bronze-delivery-evidence
+          path: |
+            validation-report.json
+            weather-field-inventory.json
+          if-no-files-found: warn
+          retention-days: 30
