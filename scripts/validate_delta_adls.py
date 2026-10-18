@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path.cwd() / 'functions'))
 
 import pyarrow as pa
 from azure.storage.blob import BlobServiceClient
-from deltalake import CommitProperties, DeltaTable
+from deltalake import CommitProperties, DeltaTable, write_deltalake
 from deltalake.exceptions import CommitFailedError
 
 from shared import config
@@ -271,6 +271,38 @@ def main():
                            storage_options=optimistic.storage_options).to_pyarrow_table().num_rows == 1)
         report['checks'].append({'name':'adls_delta_stale_snapshot_conflict', 'passed':True})
     except Exception as error:
+        if owned and container is not None and type(error).__name__ == 'TableNotFoundError':
+            # Bounded probes only under the unique root owned by this run.
+            report['diagnostic_objects'] = [item.name.removeprefix(prefix)
+                for item in container.list_blobs(name_starts_with=prefix)][:100]
+            original_zero = root + '/' + OBSERVATION_TABLE + '/_delta_log/00000000000000000000.json'
+            report['original_commit_zero_exists'] = container.get_blob_client(original_zero).exists()
+            account = os.environ['AZURE_STORAGE_ACCOUNT']
+            options = runner.writer.storage_options
+            probes = [
+                ('canonical_abfss', f'abfss://datalake@{account}.dfs.core.windows.net/{root}/probe-canonical', root + '/probe-canonical'),
+                ('empty_write_short_uri', 'az://datalake/' + root + '/probe-write', root + '/probe-write'),
+                ('create_without_config', 'az://datalake/' + root + '/probe-no-config', root + '/probe-no-config'),
+            ]
+            report['creation_probes'] = []
+            for label, uri, relative in probes:
+                probe = {'name':label}
+                try:
+                    if label == 'empty_write_short_uri':
+                        write_deltalake(uri, empty_table(OBSERVATION_TABLE), mode='error',
+                                        storage_options=options,
+                                        configuration={'delta.isolationLevel':'Serializable'})
+                        table = DeltaTable(uri, storage_options=options)
+                    else:
+                        table = DeltaTable.create(uri, TABLE_SCHEMAS[OBSERVATION_TABLE],
+                                                  mode='error', storage_options=options)
+                    probe.update(passed=True, version=table.version())
+                except Exception as probe_error:
+                    message = str(probe_error)
+                    probe.update(passed=False, error_type=type(probe_error).__name__,
+                                 no_log_segment='No files in log segment' in message)
+                probe['commit_zero_exists'] = container.get_blob_client(relative + '/_delta_log/00000000000000000000.json').exists()
+                report['creation_probes'].append(probe)
         detail = str(error)
         if connection:
             detail = detail.replace(connection, '<connection>')
