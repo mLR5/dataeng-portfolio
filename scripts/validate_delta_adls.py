@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import traceback
 import uuid
 
 sys.path.insert(0, str(Path.cwd() / 'functions'))
@@ -98,6 +99,7 @@ def main():
               'prefix':prefix, 'checks':[], 'cleanup':{'attempted':False}}
     service, container, owned = None, None, False
     previous_connection = os.environ.get('STORAGE_CONNECTION_STRING')
+    connection = None
     stage = 'configuration'
     try:
         require(config.DATALAKE_CONTAINER == 'datalake' and config.BRONZE_CONTAINER == 'bronze')
@@ -269,7 +271,19 @@ def main():
                            storage_options=optimistic.storage_options).to_pyarrow_table().num_rows == 1)
         report['checks'].append({'name':'adls_delta_stale_snapshot_conflict', 'passed':True})
     except Exception as error:
-        report['checks'].append({'name':stage, 'passed':False, 'error_type':type(error).__name__})
+        detail = str(error)
+        if connection:
+            detail = detail.replace(connection, '<connection>')
+            for item in connection.split(';'):
+                if item.startswith(('AccountKey=', 'SharedAccessSignature=')):
+                    detail = detail.replace(item.split('=', 1)[1], '<credential>')
+        detail = re.sub(r'https?://[^\s\"\'<>]+', '<storage-url>', detail)
+        detail = re.sub(r'(?i)(authorization|accountkey|sharedaccesssignature|sig)[=:][^\s,;}]+', r'\1=<redacted>', detail)
+        detail = re.sub(r'(?i)SharedKey\s+[^\s]+', 'SharedKey <redacted>', detail)
+        report['checks'].append({'name':stage, 'passed':False, 'error_type':type(error).__name__,
+                                 'detail':detail[:2500],
+                                 'locations':[f'{Path(frame.filename).name}:{frame.lineno}'
+                                              for frame in traceback.extract_tb(error.__traceback__)]})
     finally:
         if container is not None and owned:
             report['cleanup']['attempted'] = True
