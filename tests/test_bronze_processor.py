@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import azure.functions as func
 import pytest
@@ -28,7 +28,11 @@ MESSAGE = {
 def bronze_io(monkeypatch):
     io = SimpleNamespace(
         exists=Mock(return_value=False),
-        download=Mock(return_value={"ingestion_id": INGESTION_ID, "cities": []}),
+        download=Mock(return_value={
+            "ingestion_id": INGESTION_ID,
+            "ingestion_timestamp": MESSAGE["ingestion_timestamp"],
+            "cities": [],
+        }),
         upload=Mock(return_value=("https://test/bronze/blob.json", True)),
         delete=Mock(return_value=True),
     )
@@ -83,6 +87,31 @@ def test_concurrent_duplicate_keeps_existing_bronze(bronze_io):
     bronze_io.delete.assert_called_once_with(STAGING_NAME)
 
 
+def test_concurrent_completion_before_staging_read_is_recognized(bronze_io):
+    bronze_io.exists.side_effect = [False, True]
+    bronze_io.download.side_effect = StagingBlobNotFoundError("already cleaned by another consumer")
+    bronze_io.delete.return_value = False
+
+    result = weather_bronze_processor.process_claim_check(MESSAGE)
+
+    assert result["bronze_created"] is False
+    assert result["staging_deleted"] is False
+    bronze_io.upload.assert_not_called()
+    bronze_io.delete.assert_called_once_with(STAGING_NAME)
+    assert bronze_io.exists.call_args_list == [call(BRONZE_NAME), call(BRONZE_NAME)]
+
+
+def test_missing_staging_does_not_hide_a_failed_bronze_recheck(bronze_io):
+    bronze_io.exists.side_effect = [False, RuntimeError("Storage unavailable")]
+    bronze_io.download.side_effect = StagingBlobNotFoundError("missing")
+
+    with pytest.raises(RuntimeError, match="Storage unavailable"):
+        weather_bronze_processor.process_claim_check(MESSAGE)
+
+    bronze_io.upload.assert_not_called()
+    bronze_io.delete.assert_not_called()
+
+
 def test_missing_staging_without_bronze_fails_without_side_effects(bronze_io):
     bronze_io.download.side_effect = StagingBlobNotFoundError("missing")
     with pytest.raises(StagingBlobNotFoundError):
@@ -97,6 +126,56 @@ def test_staging_content_for_another_ingestion_is_not_promoted(bronze_io):
         weather_bronze_processor.process_claim_check(MESSAGE)
     bronze_io.upload.assert_not_called()
     bronze_io.delete.assert_not_called()
+
+
+@pytest.mark.parametrize("timestamp", [
+    "2026-10-17T13:00:00+00:00",
+    "2026-10-17T12:00:00.123+00:00",
+])
+def test_staging_timestamp_mismatch_is_not_promoted_or_deleted(bronze_io, timestamp):
+    bronze_io.download.return_value["ingestion_timestamp"] = timestamp
+
+    with pytest.raises(weather_bronze_processor.StagingContentMismatchError, match="ingestion_timestamp"):
+        weather_bronze_processor.process_claim_check(MESSAGE)
+
+    bronze_io.upload.assert_not_called()
+    bronze_io.delete.assert_not_called()
+
+
+@pytest.mark.parametrize("timestamp", [None, "not-a-timestamp"])
+def test_invalid_staging_timestamp_is_not_promoted_or_deleted(bronze_io, timestamp):
+    bronze_io.download.return_value["ingestion_timestamp"] = timestamp
+
+    with pytest.raises(weather_bronze_processor.StagingContentMismatchError, match="ingestion_timestamp"):
+        weather_bronze_processor.process_claim_check(MESSAGE)
+
+    bronze_io.upload.assert_not_called()
+    bronze_io.delete.assert_not_called()
+
+
+def test_missing_staging_timestamp_is_not_promoted_or_deleted(bronze_io):
+    del bronze_io.download.return_value["ingestion_timestamp"]
+
+    with pytest.raises(weather_bronze_processor.StagingContentMismatchError, match="ingestion_timestamp"):
+        weather_bronze_processor.process_claim_check(MESSAGE)
+
+    bronze_io.upload.assert_not_called()
+    bronze_io.delete.assert_not_called()
+
+
+@pytest.mark.parametrize("timestamp", [
+    "2026-10-17T14:00:00+02:00",
+    "2026-10-17T12:00:00",
+    "2026-10-17T12:00:00Z",
+])
+def test_equivalent_staging_timestamps_use_the_same_utc_partition(bronze_io, timestamp):
+    bronze_io.download.return_value["ingestion_timestamp"] = timestamp
+
+    result = weather_bronze_processor.process_claim_check(MESSAGE)
+
+    assert result["bronze_blob"] == BRONZE_NAME
+    assert result["bronze_created"] is True
+    bronze_io.upload.assert_called_once_with(bronze_io.download.return_value, BRONZE_NAME)
 
 
 def test_upload_failure_keeps_staging(bronze_io):

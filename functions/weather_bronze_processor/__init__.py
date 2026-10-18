@@ -7,9 +7,10 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from shared.azure_storage import (
-    bronze_blob_exists, download_staging_blob, upload_to_bronze, delete_staging_blob,
+    StagingBlobNotFoundError, bronze_blob_exists, download_staging_blob,
+    upload_to_bronze, delete_staging_blob,
 )
-from shared.claim_check import InvalidMessageError, bronze_blob_name, parse_message
+from shared.claim_check import InvalidMessageError, bronze_blob_name, parse_message, parse_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -18,28 +19,55 @@ class StagingContentMismatchError(Exception):
     """Le blob staging ne correspond pas à l'ingestion annoncée par le message."""
 
 
+def _validate_staging_content(bronze_data, message):
+    staging_name = message['blob_name']
+    if not isinstance(bronze_data, dict) or bronze_data.get('ingestion_id') != message['ingestion_id']:
+        raise StagingContentMismatchError(
+            f"Staging blob {staging_name} does not match the message ingestion_id"
+        )
+
+    timestamp = bronze_data.get('ingestion_timestamp')
+    try:
+        matches = isinstance(timestamp, str) and (
+            parse_timestamp(timestamp) == parse_timestamp(message['ingestion_timestamp'])
+        )
+    except (ValueError, OverflowError):
+        matches = False
+    if not matches:
+        raise StagingContentMismatchError(
+            f"Staging blob {staging_name} does not match the message ingestion_timestamp"
+        )
+
+
 def process_claim_check(message):
     """Promeut un blob staging vers Bronze. Rejouable : un message déjà traité ne produit rien de plus."""
     ingestion_id = message['ingestion_id']
     staging_name = message['blob_name']
     bronze_name = bronze_blob_name(ingestion_id, message['ingestion_timestamp'])
+    bronze_created = False
 
     # Étape 1: Reconnaître un Bronze déjà produit (message rejoué ou dupliqué)
     if bronze_blob_exists(bronze_name):
         logger.info(f"Step 1: Bronze already produced, skipping upload: {bronze_name}")
-        bronze_created = False
     else:
         # Étape 2: Télécharger le staging et vérifier qu'il correspond au message
         logger.info("Step 2: Downloading blob from staging")
-        bronze_data = download_staging_blob(staging_name)
-        if bronze_data.get('ingestion_id') != ingestion_id:
-            raise StagingContentMismatchError(
-                f"Staging blob {staging_name} contains ingestion {bronze_data.get('ingestion_id')!r}"
+        try:
+            bronze_data = download_staging_blob(staging_name)
+        except StagingBlobNotFoundError:
+            # Un autre consommateur peut avoir écrit Bronze puis supprimé le staging
+            # après notre premier contrôle d'existence.
+            if not bronze_blob_exists(bronze_name):
+                raise
+            logger.info(
+                f"Bronze produced by another consumer before staging download: {bronze_name}"
             )
+        else:
+            _validate_staging_content(bronze_data, message)
 
-        # Étape 3: Upload vers Bronze sans écraser
-        logger.info("Step 3: Uploading to bronze layer")
-        _, bronze_created = upload_to_bronze(bronze_data, bronze_name)
+            # Étape 3: Upload vers Bronze sans écraser
+            logger.info("Step 3: Uploading to bronze layer")
+            _, bronze_created = upload_to_bronze(bronze_data, bronze_name)
 
     # Étape 4: Nettoyer le staging, uniquement une fois Bronze présent.
     # Un échec ici n'invalide pas Bronze : la lifecycle policy purge le staging après 7 jours.
