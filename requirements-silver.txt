@@ -1,0 +1,4 @@
+# S1 feasibility and S2/S3 development only. Production Functions adoption is S4.
+# Tested together; change deliberately and rerun creation/MERGE/UTC roundtrips.
+deltalake==1.2.1
+pyarrow==21.0.0

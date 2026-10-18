@@ -1,0 +1,47 @@
+{
+  "kind": "derived_from_real_bronze",
+  "capture_workflow": "https://github.com/mLR5/dataeng-portfolio/actions/runs/39176102671",
+  "original_source_blob": "weather/weatherapi/2026/10/18/14/20261018_140443_a832e2104ae947e1a909f1dff8c2a518_weather_data.json",
+  "original_source_sha256": "4e550fd849b6cac6f0457be9391b2f8def9af35c4797e85bb23ee1733c0f1279",
+  "original_bytes": 350438,
+  "derived_fixture": "bronze_success_20261018_derived_real.json",
+  "derived_sha256": "446b82ec895af9742a5570e3d3130997e8320dabe35d7c310baa1a4a7cc7406c",
+  "reduction": "Only forecast.forecastday[].hour arrays truncated to first two original entries per day. All other values unchanged. JSON formatting changed.",
+  "original_cities": [
+    {
+      "query": "Paris",
+      "timezone": "Europe/Paris",
+      "forecast_days": 3,
+      "hours_per_day": [
+        24,
+        24,
+        24
+      ]
+    },
+    {
+      "query": "Londres",
+      "timezone": "America/Argentina/Catamarca",
+      "forecast_days": 3,
+      "hours_per_day": [
+        24,
+        24,
+        24
+      ]
+    },
+    {
+      "query": "Bruxelles",
+      "timezone": "Europe/Brussels",
+      "forecast_days": 3,
+      "hours_per_day": [
+        24,
+        24,
+        24
+      ]
+    }
+  ],
+  "expected_retained_hours_per_city": 6,
+  "expected_valid_observations": 2,
+  "expected_valid_forecasts": 12,
+  "expected_status": "partial",
+  "known_source_issue": "Query Londres resolves to America/Argentina/Catamarca (Argentina), not London. Retained unchanged; must be rejected location_mismatch."
+}

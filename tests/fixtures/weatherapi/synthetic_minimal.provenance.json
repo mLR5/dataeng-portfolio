@@ -1,0 +1,8 @@
+{
+  "kind": "synthetic",
+  "description": "Artificial weather values, handcrafted for type and transformation tests. Never fetched from WeatherAPI or Bronze.",
+  "expected_cities": 3,
+  "expected_hours_per_city": 2,
+  "expected_observations": 3,
+  "expected_forecasts": 6
+}
