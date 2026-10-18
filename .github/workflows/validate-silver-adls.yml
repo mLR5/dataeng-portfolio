@@ -1,0 +1,51 @@
+name: Validate Silver Delta on ADLS
+on:
+  push:
+    branches: [validation/silver-delta-adls]
+    paths:
+      - '.github/workflows/validate-silver-adls.yml'
+      - 'scripts/validate_delta_adls.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: validate-silver-delta-adls-dev
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: |
+            requirements-dev.txt
+            requirements-silver.txt
+            functions/requirements.txt
+      - name: Install project and Delta dependencies
+        run: python -m pip install -r requirements-dev.txt -r requirements-silver.txt
+      - name: Validate dependencies
+        run: python -m pip check
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Verify Delta and leases in a disposable prefix
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+          PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
+          ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+        run: python scripts/validate_delta_adls.py
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: silver-delta-adls-evidence
+          path: silver-delta-validation/validation-report.json
+          if-no-files-found: warn
+          retention-days: 30
