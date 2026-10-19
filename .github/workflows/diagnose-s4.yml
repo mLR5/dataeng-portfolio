@@ -1,0 +1,21 @@
+name: Diagnose owned S4 validation app
+on:
+  push:
+    branches: [validation/s4-diagnose]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Inspect only the active owned temporary app
+        env:
+          PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
+          ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+        run: python scripts/diagnose_s4_owned_app.py
