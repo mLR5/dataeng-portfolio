@@ -126,16 +126,14 @@ Codes retour : `0` = terminé, `2` = continuation ou candidats restant en aperç
 classe, sans contenu SDK ni secret. L’outil ne supprime aucun blob et n’appelle
 jamais WeatherAPI.
 
-## Vérifications Azure restantes
+## Vérifications restantes pour S4
 
-Sur un préfixe d’essai isolé : authentification Azure Blob + delta-rs sur le même
-compte, création/lecture des deux schémas, `MERGE`, conflit de deux writers,
-renouvellement/perte de lease et panne entre commits ; comparer publications,
-versions et lignes par un lecteur Delta indépendant. Vérifier ensuite le paquet
-Azure Functions Python 3.11, la mémoire et le chargement effectif des fonctions
-Bronze/Silver. Les tests locaux ne valent pas déploiement ni acceptation Azure.
+Vérifier le paquet Azure Functions Python 3.11, la mémoire et le chargement
+effectif des fonctions Bronze/Silver, puis le timer, les travaux en attente,
+les alertes et le bootstrap de l’historique. L’acceptation du stockage ci-dessous
+ne constitue pas un déploiement du traitement planifié Silver.
 
-## Acceptation ADLS isolée préparée
+## Acceptation ADLS isolée réussie
 
 `make_azure_runner(root=...)` accepte une racine relative `silver/...` validée
 avant tout accès aux credentials. Les chemins absolus, traversal, URL/paramètres,
@@ -150,8 +148,19 @@ panne entre tables, filtre Gold, contention et perte du lease d’essai, et conf
 optimiste de deux snapshots Delta. Son `finally` nettoie uniquement les objets
 sous le préfixe possédé et écrit un rapport JSON sans erreur SDK brute ni secret.
 
-À ce stade, le script est préparé et les tests de garde sont exécutés localement ;
-**aucun résultat Azure n’est revendiqué avant son exécution par le parent**.
+[Le run de validation Azure](https://github.com/mLR5/dataeng-portfolio/actions/runs/39179771927)
+réussit les **dix contrôles réels** : racine isolée, transformation des deux
+Bronze existants, valeurs et commits des deux tables, rejeu sans nouveau commit,
+contention/renouvellement du lease, exclusion d’une ingestion incomplète pour
+Gold, reprise sans doublons, conflit de contenu immuable, rupture serveur du
+lease suivie de reprise et conflit optimiste de snapshots sur ADLS.
+
+Le test utilise la connexion du compte existant, en mémoire et sans secret dans
+le rapport. Les deux ingestions produisent ensemble quatre observations et
+288 prévisions ; Londres résolue en Argentine est rejetée, statut `partial`.
+Le nettoyage a supprimé 46 objets de test : zéro objet restant sous le préfixe,
+et aucun marqueur de sa racine. Les données Bronze et les tables métier n’ont
+pas été modifiées. L’artefact `silver-delta-adls-evidence` contient le bilan.
 
 ## URI ADLS canonique requise
 
@@ -165,5 +174,5 @@ Le diagnostic Azure du run `39179393152` a montré que, pour le compte ADLS/HNS
 testé avec `deltalake==1.2.1`, l’alias court `az://` échouait lors de la création
 avec « No files in log segment » et aucun commit0 écrit ; l’URI canonique
 `abfss://` créait bien une table vide à la version0. Le préfixe d’essai a été
-nettoyé. Cette preuve valide le choix de l’URI ; le parcours complet Azure
-doit encore être relancé sur ce correctif avant de déclarer S3 accepté sur ADLS.
+nettoyé. Le parcours complet a ensuite été exécuté avec succès dans le run
+`39179771927` ci-dessus, sur le code de stockage corrigé.
