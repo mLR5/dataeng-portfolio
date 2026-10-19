@@ -226,6 +226,7 @@ def validate():
         'AzureWebJobsStorage': connection, 'DEPLOYMENT_STORAGE_CONNECTION_STRING': connection,
         'AzureWebJobsFeatureFlags': 'EnableWorkerIndexing',
         'STORAGE_CONNECTION_STRING': connection, 'STORAGE_ACCOUNT_NAME': account,
+        'QUEUE_NAME': f'vs4-unused-{NONCE}', 'STAGING_CONTAINER': source_container,
         'BRONZE_CONTAINER': 'bronze', 'DATALAKE_CONTAINER': 'datalake',
         'SILVER_ENABLED': 'true', 'SILVER_ROOT': root_a, 'SILVER_TIMER_SCHEDULE': '0 * * * * *',
         'SILVER_START_AT': cutoff.isoformat(),
@@ -249,6 +250,12 @@ def validate():
                                                   'storageAccountConnectionStringName': 'DEPLOYMENT_STORAGE_CONNECTION_STRING'}}}},
                        'siteConfig': {'appSettings': [{'name': k, 'value': v} for k, v in values.items()]}},
     })
+    # Write through the app-settings API as well: the build service resolves its
+    # deployment connection by setting name, before the Python host is started.
+    app_settings(app, rg, values)
+    configured_names = az(['functionapp', 'config', 'appsettings', 'list', '--name', app,
+                           '--resource-group', rg, '--query', '[].name'])
+    check('all_runtime_settings_present', set(values) <= set(configured_names))
     REPORT['stage'] = 'remote_build_and_deploy'
     persist()
     with tempfile.TemporaryDirectory() as temporary:
@@ -259,8 +266,12 @@ def validate():
                     target.write(file, file.relative_to(BASE / 'functions'))
         az(['functionapp', 'deployment', 'source', 'config-zip', '--resource-group', rg, '--name', app,
             '--src', str(archive), '--build-remote', 'true'], timeout=900)
-    names = wait_for('six_functions_indexed_with_delta_dependencies', lambda: (
-        result if len(result := production_functions(app, rg)) == 6 else None), seconds=180)
+    def indexed_functions():
+        result = production_functions(app, rg)
+        REPORT['isolated_indexed_functions'] = result
+        persist()
+        return result if len(result) == 6 else None
+    names = wait_for('six_functions_indexed_with_delta_dependencies', indexed_functions, seconds=180)
     check('silver_functions_indexed', {'weather_silver_processor', 'silver_health_monitor'} <= set(names))
     settings = SilverSettings.from_env({**values, 'SILVER_ROOT': root_a})
     config.BRONZE_CONTAINER = 'bronze'
@@ -463,6 +474,7 @@ if __name__ == '__main__':
                       'stage': REPORT.get('stage'), 'reason': REPORT.get('validation_error_reason'),
                       'source_objects_scanned': REPORT.get('source_objects_scanned'),
                       'first_source_object': REPORT.get('first_source_object'),
+                      'isolated_indexed_functions': REPORT.get('isolated_indexed_functions'),
                       'source_scope': REPORT.get('source_scope')}), flush=True)
     success = REPORT['cleanup'].get('result') == 'success' and ('--cleanup' in sys.argv or REPORT['result'] == 'success')
     raise SystemExit(0 if success else 1)
