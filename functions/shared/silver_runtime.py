@@ -32,19 +32,29 @@ def _source_time(path):
     return datetime.strptime(identity[:15], '%Y%m%d_%H%M%S').replace(tzinfo=timezone.utc)
 
 
-def earliest_bronze(container):
-    """Azure lists names lexically. Bound malformed objects before the first ID."""
-    values = container.list_blobs(name_starts_with=config.BRONZE_PATH_PREFIX + '/', results_per_page=100)
-    for index, value in enumerate(values):
-        if index >= 1000:
-            raise RuntimeError('Earliest Bronze scan exceeded its bound')
+def earliest_bronze(container, *, cursor=None, limit=1000):
+    """One lexical page, resumable even through many directory/legacy objects."""
+    if not 1 <= limit <= 1000 or (cursor is not None and not isinstance(cursor, str)):
+        raise ValueError('Invalid earliest discovery bounds/cursor')
+    pages = container.list_blobs(
+        name_starts_with=config.BRONZE_PATH_PREFIX + '/', results_per_page=limit,
+    ).by_page(continuation_token=cursor)
+    try:
+        values = list(next(pages))
+        exhausted = False
+    except StopIteration:
+        values = []
+        exhausted = True
+    if len(values) > limit:
+        raise RuntimeError('Storage exceeded earliest discovery page bound')
+    for value in values:
         try:
             stamp = _source_time(value.name)
             if value.name.startswith(f'{config.BRONZE_PATH_PREFIX}/{stamp:%Y/%m/%d/%H}/'):
-                return stamp
+                return {'earliest': stamp, 'continuation': None, 'inspected': len(values)}
         except ValueError:
             continue
-    return None
+    return {'earliest': None, 'continuation': None if exhausted else pages.continuation_token, 'inspected': len(values)}
 
 
 def new_state(settings):
@@ -53,7 +63,8 @@ def new_state(settings):
         'root': settings.root, 'bronze_container': config.BRONZE_CONTAINER,
         'configured_start_at': settings.start_at,
         'recent': None,
-        'history': {'origin': None, 'horizon': None, 'next_at': None, 'window': None, 'passes': 0},
+        'history': {'origin': None, 'horizon': None, 'next_at': None, 'window': None, 'passes': 0,
+                    'bootstrap_cursor': None},
         'pending': {}, 'last_started_at': None, 'last_finished_at': None,
         'latest_source_at': None, 'latest_usable_at': None,
         'latest_publication_status': None, 'latest_quality_degraded': None,
@@ -79,6 +90,8 @@ def validate_state(state, settings):
     history = state.get('history')
     if not isinstance(history, dict) or type(history.get('passes')) is not int or history['passes'] < 0:
         raise ValueError('Invalid runtime history state')
+    if history.get('bootstrap_cursor') is not None and not isinstance(history['bootstrap_cursor'], str):
+        raise ValueError('Invalid runtime bootstrap cursor')
     for stamp in ('origin', 'horizon', 'next_at'):
         if history.get(stamp) is not None:
             _utc(history[stamp])
@@ -145,8 +158,15 @@ def _discover(state, lane, runner, settings, now, session, report):
         window = state['recent']
     else:
         if history['horizon'] is None:
-            first = _utc(settings.start_at) if settings.start_at else earliest_bronze(runner.bronze)
+            if settings.start_at:
+                first = _utc(settings.start_at)
+            else:
+                page = earliest_bronze(runner.bronze, cursor=history.get('bootstrap_cursor'))
+                history['bootstrap_cursor'] = page['continuation']
+                report['inspected'] += page['inspected']
+                first = page['earliest']
             if first is None or first >= now:
+                _save(session, state)
                 return
             # Refresh the earliest name on every pass: older late arrivals are covered.
             if history['origin'] is not None:

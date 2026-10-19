@@ -21,7 +21,9 @@ Deux parcours bornés partagent les travaux en attente :
   ce parcours recommence et recherche à nouveau la première archive. Une arrivée
   tardive antérieure à l'ancien point de départ reste donc découverte.
 
-Le premier passage effectue le bootstrap automatiquement. Aucun jour de départ
+La recherche initiale avance elle aussi par pages, avec un curseur persistant :
+plus de mille répertoires ou anciens objets non canoniques ne bloquent pas le
+bootstrap. Le premier passage effectue le bootstrap automatiquement. Aucun jour de départ
 n'est deviné. `SILVER_START_AT` permet de restreindre explicitement ce périmètre ;
 par défaut, toutes les archives canoniques retenues sont éligibles.
 
@@ -133,7 +135,12 @@ contient ainsi toutes les définitions nécessaires au build distant.
 
 Le workflow **Validate S4 on isolated Azure Functions** est lançable manuellement.
 Il crée une Function App et un plan Flex temporaires ; les fonctions Bronze y
-sont désactivées. Il valide le bootstrap du vrai Bronze vers une racine isolée,
+sont désactivées. Il inventorie le vrai Bronze (jusqu’à 100 000 objets) puis valide le bootstrap
+de toutes les archives d’une fenêtre déclarée de 48 heures maximum, jusqu’à
+environ 80 ingestions, vers une racine isolée. La taille et la borne de ce
+périmètre sont inscrites dans le rapport ; il ne prétend pas charger tout le
+Bronze métier avant fusion. Le parcours historique sans borne de départ est
+aussi testé sur le conteneur isolé et par les régressions multi-semaines. Il
 puis copie sans modification deux archives réelles d'heures consécutives dans un
 conteneur temporaire pour tester l'arrivée progressive des fichiers.
 

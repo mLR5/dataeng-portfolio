@@ -183,6 +183,22 @@ def test_reconciliation_expands_origin_for_an_even_earlier_late_archive():
     assert store.state['history']['origin'] == START.isoformat()
 
 
+def test_full_history_scan_crosses_seven_day_windows_and_empty_weeks():
+    store = MemoryStore()
+    old, later = path(0, 0), 'weather/weatherapi/2026/11/02/00/20261102_000000_weather_data.json'
+    committed = set()
+    def process(name):
+        committed.add(name)
+        return ProcessResult('published', name, publication(name))
+    instance = runner([old, later], process)
+    settings = replace(SETTINGS, discovery_pages=168, lookback_hours=1)
+    now = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    for tick in range(3):
+        run_tick(instance, store, settings, now=now + timedelta(minutes=5 * tick))
+    assert committed == {old, later}
+    assert store.state['history']['passes'] == 1
+
+
 def test_pagination_and_batch_limit_do_not_omit_candidates():
     store = MemoryStore()
     names = [path(1, i) for i in range(8)]
@@ -293,10 +309,23 @@ def test_invalid_settings_fail_before_clients(update):
 
 def test_earliest_discovery_ignores_noncanonical_objects_and_is_bounded():
     container = RuntimeContainer(['weather/weatherapi/0000/invalid', path(1, 0)])
-    assert earliest_bronze(container) == START + timedelta(hours=1)
-    container.names = [f'weather/weatherapi/0000/{i:04d}' for i in range(1001)]
-    with pytest.raises(RuntimeError, match='bound'):
-        earliest_bronze(container)
+    assert earliest_bronze(container)['earliest'] == START + timedelta(hours=1)
+    container.names = [f'weather/weatherapi/0000/{i:04d}' for i in range(1001)] + [path(1, 0)]
+    first = earliest_bronze(container)
+    assert first['earliest'] is None and first['continuation'] is not None and first['inspected'] == 1000
+    assert earliest_bronze(container, cursor=first['continuation'])['earliest'] == START + timedelta(hours=1)
+
+
+def test_bootstrap_cursor_survives_more_than_one_thousand_legacy_objects():
+    store = MemoryStore()
+    names = [f'weather/weatherapi/0000/{i:04d}' for i in range(1001)] + [path(1, 0)]
+    instance = runner(names)
+    settings = replace(SETTINGS, lookback_hours=1)
+    first = run_tick(instance, store, settings, now=NOW)
+    assert first['technical_errors'] == first['discovery_errors'] == 0
+    assert store.state['history']['bootstrap_cursor'] is not None
+    second = run_tick(instance, store, settings, now=NOW + timedelta(minutes=5))
+    assert second['published'] == 1 and store.state['history']['passes'] == 1
 
 
 def test_lease_fenced_checkpoint_upload_carries_actual_lease(monkeypatch):

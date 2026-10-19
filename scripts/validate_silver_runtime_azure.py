@@ -31,7 +31,7 @@ from shared.silver_contract import FORECAST_TABLE, TABLE_SCHEMAS
 from shared.silver_lease import BlobWriterLease
 from shared.silver_publication import json_bytes, published_read_plan, publication_name
 from shared.silver_runner import bronze_identity
-from shared.silver_runtime import STATE_NAME, _source_time, make_runtime, run_tick
+from shared.silver_runtime import STATE_NAME, _source_time, earliest_bronze, make_runtime, run_tick
 from shared.silver_settings import SilverSettings
 from shared.silver_transform import transform_bronze
 
@@ -111,11 +111,13 @@ def source_snapshot(container):
         REPORT['source_objects_scanned'] = index + 1
         if index == 0:
             REPORT['first_source_object'] = item.name
-        if index >= 5000:
-            raise ValidationError('Validation source snapshot exceeds its 5000-object bound')
+        if index >= 100000:
+            raise ValidationError('Validation source snapshot exceeds its 100000-object bound')
         try:
             stamp = _source_time(item.name)
             if item.name.startswith(f'weather/weatherapi/{stamp:%Y/%m/%d/%H}/'):
+                if not names:
+                    REPORT['first_valid_source_index'] = index
                 names.append(item.name)
         except ValueError:
             continue
@@ -176,7 +178,27 @@ def validate():
     originals = SERVICE.get_container_client('bronze')
     REPORT['stage'] = 'inventory_source'
     persist()
-    snapshot = source_snapshot(originals)
+    retained = source_snapshot(originals)
+    check('retained_bronze_inventory_nonempty', bool(retained))
+    cursor = None
+    for page_number in range(100):
+        first_page = earliest_bronze(originals, cursor=cursor)
+        if first_page['earliest'] is not None:
+            break
+        cursor = first_page['continuation']
+        if cursor is None:
+            break
+    check('real_paginated_earliest_discovery', first_page['earliest'] == _source_time(retained[0]),
+          {'pages': page_number + 1, 'first_valid_object_index': REPORT.get('first_valid_source_index')})
+    # The PR must not run an unbounded business backfill before merge. Exercise
+    # every retained archive in a declared <=48h window containing at most ~80
+    # ordinary hourly ingestions. Default full-history discovery is tested below
+    # on the isolated source, and by the multi-window scheduler regression.
+    cutoff = max(_source_time(retained[-1]) - timedelta(hours=48), _source_time(retained[-min(80, len(retained))]))
+    snapshot = [name for name in retained if _source_time(name) >= cutoff]
+    REPORT['source_scope'] = {'total_retained_ingestions': len(retained),
+                              'validation_from': cutoff.isoformat(), 'selected_ingestions': len(snapshot),
+                              'maximum_window_hours': 48}
     check('retained_bronze_snapshot_nonempty', bool(snapshot), {'ingestions': len(snapshot)})
     by_hour = {}
     for name in snapshot:
@@ -206,6 +228,7 @@ def validate():
         'STORAGE_CONNECTION_STRING': connection, 'STORAGE_ACCOUNT_NAME': account,
         'BRONZE_CONTAINER': 'bronze', 'DATALAKE_CONTAINER': 'datalake',
         'SILVER_ENABLED': 'true', 'SILVER_ROOT': root_a, 'SILVER_TIMER_SCHEDULE': '0 * * * * *',
+        'SILVER_START_AT': cutoff.isoformat(),
         'SILVER_HEALTH_SCHEDULE': '0 * * * * *', 'SILVER_BATCH_SIZE': '100',
         'SILVER_DISCOVERY_LIMIT': '100', 'SILVER_DISCOVERY_PAGES': '168', 'SILVER_BUDGET_SECONDS': '480',
         **{f'AzureWebJobs.{name}.Disabled': 'true' for name in before},
@@ -259,12 +282,13 @@ def validate():
 
     # Phase B: new isolated source/root. Fail after the first genuine Delta commit.
     app_settings(app, rg, {'BRONZE_CONTAINER': source_container, 'SILVER_ROOT': root_b,
-                          'SILVER_ENABLED': 'false', 'AzureWebJobs.weather_silver_processor.Disabled': 'true'})
+                          'SILVER_START_AT': '', 'SILVER_ENABLED': 'false',
+                          'AzureWebJobs.weather_silver_processor.Disabled': 'true'})
     isolated_source = SERVICE.get_container_client(source_container)
     raws = {name: originals.get_blob_client(name).download_blob().readall() for name in pair}
     isolated_source.get_blob_client(pair[0]).upload_blob(raws[pair[0]], overwrite=False)
     config.BRONZE_CONTAINER = source_container
-    settings_b = SilverSettings.from_env({**values, 'SILVER_ROOT': root_b})
+    settings_b = SilverSettings.from_env({**values, 'SILVER_ROOT': root_b, 'SILVER_START_AT': ''})
     runner_b, store_b, _ = make_runtime(settings_b)
     real_writer = runner_b.writer
     class InjectedInterruption(RuntimeError):
@@ -438,6 +462,7 @@ if __name__ == '__main__':
                       'error_type': REPORT.get('error_type'), 'last_cli_error': REPORT.get('last_cli_error'),
                       'stage': REPORT.get('stage'), 'reason': REPORT.get('validation_error_reason'),
                       'source_objects_scanned': REPORT.get('source_objects_scanned'),
-                      'first_source_object': REPORT.get('first_source_object')}), flush=True)
+                      'first_source_object': REPORT.get('first_source_object'),
+                      'source_scope': REPORT.get('source_scope')}), flush=True)
     success = REPORT['cleanup'].get('result') == 'success' and ('--cleanup' in sys.argv or REPORT['result'] == 'success')
     raise SystemExit(0 if success else 1)
