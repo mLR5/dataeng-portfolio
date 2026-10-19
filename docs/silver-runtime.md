@@ -135,7 +135,9 @@ contient ainsi toutes les définitions nécessaires au build distant.
 
 Le workflow **Validate S4 on isolated Azure Functions** est lançable manuellement.
 Il crée une Function App et un plan Flex temporaires ; les fonctions Bronze y
-sont désactivées. Il inventorie le vrai Bronze (jusqu’à 100 000 objets) puis valide le bootstrap
+sont désactivées. Il inventorie une fenêtre récente du vrai Bronze par pages bornées (au plus
+20 000 objets), sans parcourir tous les anciens objets pour préparer le test,
+puis valide le bootstrap
 de toutes les archives d’une fenêtre déclarée de 48 heures maximum, jusqu’à
 environ 80 ingestions, vers une racine isolée. La taille et la borne de ce
 périmètre sont inscrites dans le rapport ; il ne prétend pas charger tout le

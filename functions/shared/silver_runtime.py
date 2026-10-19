@@ -202,9 +202,12 @@ def _discover(state, lane, runner, settings, now, session, report):
 
 def _record_publication(state, result, settings):
     publication = result.publication
-    if not publication or not publication.get('collected_at_utc'):
+    if not publication:
         return
-    stamp = _utc(publication['collected_at_utc'])
+    # A malformed JSON has no envelope timestamp. Its canonical source identity
+    # still orders quality events, without making any rejected data usable/fresh.
+    stamp = (_utc(publication['collected_at_utc']) if publication.get('collected_at_utc')
+             else _source_time(publication['source_blob']))
     status = publication['status']
     tables = publication['tables']
     usable = status in ('success', 'partial') and all(table['row_count'] > 0 for table in tables.values())

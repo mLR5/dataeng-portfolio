@@ -285,6 +285,22 @@ def test_older_partial_publication_does_not_replace_latest_good_quality():
     assert check_silver_health(store, SETTINGS, now=NOW)['quality_degraded'] is False
 
 
+def test_new_malformed_archive_is_visible_in_quality_without_freshening_data():
+    store = MemoryStore()
+    valid, malformed = path(1, 0), path(2, 0)
+    def process(name):
+        value = publication(name)
+        if name == malformed:
+            value.update(collected_at_utc=None, source_blob=name, status='rejected', summary={})
+            value['tables'] = {'observations': {'row_count': 0}, 'forecasts': {'row_count': 0}}
+        return ProcessResult('published', name, value)
+    run_tick(runner([valid, malformed], process), store, SETTINGS, now=NOW)
+    health = check_silver_health(store, SETTINGS, now=NOW)
+    assert health['latest_status'] == 'rejected' and health['quality_degraded'] is True
+    assert health['latest_source_at'] == (START + timedelta(hours=2)).isoformat()
+    assert health['latest_usable_at'] == (START + timedelta(hours=1)).isoformat()
+
+
 def test_future_health_timestamp_is_an_error_not_permanent_freshness():
     store = MemoryStore()
     run_tick(runner([path(2, 0)]), store, SETTINGS, now=NOW)
