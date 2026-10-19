@@ -1,0 +1,3 @@
+# Runtime Delta pins shared by local development, CI and the deployed package.
+deltalake==1.2.1
+pyarrow==21.0.0

@@ -83,6 +83,11 @@ module "function_app" {
   weatherapi_secret_uri = "${module.keyvault.vault_uri}secrets/weather-api-key"
   queue_name            = module.storage.queue_name
   datalake_container    = "datalake"
+  additional_app_settings = {
+    SILVER_ENABLED         = "true"
+    SILVER_TIMER_SCHEDULE  = "0 */5 * * * *"
+    SILVER_HEALTH_SCHEDULE = "0 */15 * * * *"
+  }
 
   tags = var.tags
 

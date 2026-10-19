@@ -63,3 +63,15 @@ variable "bronze_alert_action_group_ids" {
   type        = list(string)
   default     = []
 }
+
+variable "silver_monitoring_enabled" {
+  description = "Create five Silver log alerts; the independent health timer remains active."
+  type        = bool
+  default     = true
+}
+
+variable "silver_alert_action_group_ids" {
+  description = "Existing action groups for Silver. Empty: Azure alerts without external notifications."
+  type        = list(string)
+  default     = []
+}

@@ -1,5 +1,6 @@
 # Azure Functions Dependencies
 azure-functions>=1.18.0
+-r requirements-silver.txt
 
 # HTTP Requests
 requests>=2.31.0
