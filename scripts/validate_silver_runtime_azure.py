@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""Isolated real Flex runtime acceptance; never deploy to the main Function App.
+
+Creates an owned temporary app/plan, two storage prefixes and disabled log rules.
+Copies two genuine consecutive-hour archives unchanged to a temporary container.
+The deployed timer is never invoked manually. Every resource is removed finally.
+"""
+from datetime import datetime, timedelta, timezone
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+import zipfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'functions'))
+
+from azure.core.exceptions import ResourceNotFoundError
+from azure.storage.blob import BlobServiceClient
+from deltalake import DeltaTable
+
+from shared import config
+from shared.claim_check import parse_timestamp
+from shared.silver_contract import FORECAST_TABLE, TABLE_SCHEMAS
+from shared.silver_lease import BlobWriterLease
+from shared.silver_publication import json_bytes, published_read_plan, publication_name
+from shared.silver_runner import bronze_identity
+from shared.silver_runtime import STATE_NAME, _source_time, make_runtime, run_tick
+from shared.silver_settings import SilverSettings
+from shared.silver_transform import transform_bronze
+
+BASE = Path(__file__).resolve().parents[1]
+REPORT_PATH = Path('silver-s4-report.json')
+MANIFEST_PATH = Path('silver-s4-resources.json')
+NONCE = os.environ.get('GITHUB_RUN_ID', '') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+if not re.fullmatch(r'\d+-\d+', NONCE):
+    raise RuntimeError('Run this validation from its GitHub workflow')
+REPORT = {'result': 'failed', 'commit': os.environ.get('GITHUB_SHA'), 'checks': [], 'cleanup': {}}
+OWNED = {'owner': NONCE, 'resource_ids': [], 'containers': [], 'root': f'silver/validation-s4/{NONCE}'}
+SERVICE = None
+
+
+def persist():
+    REPORT_PATH.write_bytes(json_bytes(REPORT))
+    MANIFEST_PATH.write_bytes(json_bytes(OWNED))
+
+
+def check(name, condition, detail=None):
+    REPORT['checks'].append({'name': name, 'passed': bool(condition), 'detail': detail})
+    persist()
+    print(f"{'PASS' if condition else 'FAIL'} {name}", flush=True)
+    if not condition:
+        raise AssertionError(name)
+
+
+def az(args, *, timeout=180, absent_ok=False):
+    result = subprocess.run(['az', *args, '--only-show-errors', '--output', 'json'],
+                            capture_output=True, text=True, timeout=timeout)
+    if result.returncode:
+        if absent_ok and any(code in result.stderr for code in ('ResourceNotFound', 'ResourceGroupNotFound', 'NotFound')):
+            return None
+        codes = re.findall(r'\(([A-Za-z][A-Za-z0-9]+)\)|"code"\s*:\s*"([A-Za-z][A-Za-z0-9]+)"', result.stderr)
+        codes = [first or second for first, second in codes]
+        REPORT['last_cli_error'] = {'command': args[:2], 'codes': codes[:3]}
+        raise RuntimeError('Azure CLI command failed; raw output withheld')
+    return json.loads(result.stdout) if result.stdout.strip() else None
+
+
+def arm(method, resource_id, body=None, api='2024-04-01'):
+    args = ['rest', '--method', method, '--url', f'{resource_id}?api-version={api}']
+    if body is None:
+        return az(args, absent_ok=method in ('delete', 'get'))
+    with tempfile.TemporaryDirectory() as temporary:
+        file = Path(temporary) / 'body.json'
+        file.write_bytes(json_bytes(body))
+        return az([*args, '--body', '@' + str(file)])
+
+
+def wait_for(name, predicate, *, seconds=360):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            check(name, True)
+            return value
+        time.sleep(10)
+    check(name, False)
+
+
+def app_settings(app, rg, values):
+    with tempfile.TemporaryDirectory() as temporary:
+        file = Path(temporary) / 'settings.json'
+        file.write_bytes(json_bytes(values))
+        az(['functionapp', 'config', 'appsettings', 'set', '--name', app, '--resource-group', rg,
+            '--settings', '@' + str(file)])
+
+
+def source_snapshot(container):
+    names = []
+    for index, item in enumerate(container.list_blobs(name_starts_with='weather/weatherapi/')):
+        if index >= 5000:
+            raise RuntimeError('Validation source snapshot exceeds its 5000-object bound')
+        try:
+            stamp = _source_time(item.name)
+            if item.name.startswith(f'weather/weatherapi/{stamp:%Y/%m/%d/%H}/'):
+                names.append(item.name)
+        except ValueError:
+            continue
+    return sorted(names)
+
+
+def publications(runner):
+    prefix = runner.controls.prefix + '/publications/'
+    return [json.loads(runner.controls.container.get_blob_client(item.name).download_blob().readall())
+            for item in runner.controls.container.list_blobs(name_starts_with=prefix)]
+
+
+def table_versions(runner):
+    return {name: DeltaTable(runner.writer.table_path(name), storage_options=runner.writer.storage_options).version()
+            for name in TABLE_SCHEMAS}
+
+
+def verify_gold(runner, published):
+    plan = published_read_plan(published)
+    result = {}
+    for name, spec in plan['tables'].items():
+        rows = DeltaTable(spec['path'], version=spec['version'], storage_options=runner.writer.storage_options).to_pyarrow_table(
+            filters=[('ingestion_id', 'in', plan['ingestion_ids'])]).cast(TABLE_SCHEMAS[name]).to_pylist()
+        keys = ('ingestion_id', 'city_id', 'observed_at_utc' if name != FORECAST_TABLE else 'target_at_utc')
+        check('no_duplicate_keys_' + name, len({tuple(row[key] for key in keys) for row in rows}) == len(rows))
+        expected = sum(pub['tables'][name]['row_count'] for pub in published)
+        check('published_row_counts_' + name, len(rows) == expected, {'actual': len(rows), 'expected': expected})
+        result[name] = len(rows)
+    return result
+
+
+def production_functions(app, rg):
+    return sorted(entry['name'].rsplit('/', 1)[-1] for entry in az([
+        'functionapp', 'function', 'list', '--name', app, '--resource-group', rg]))
+
+
+def validate():
+    global SERVICE
+    project, environment = os.environ['PROJECT_NAME'], os.environ['ENVIRONMENT']
+    account = os.environ['AZURE_STORAGE_ACCOUNT']
+    location = os.environ.get('AZURE_LOCATION') or 'francecentral'
+    rg = f'rg-{project}-{environment}'
+    main_app = f'func-{project}-{environment}'
+    app = f'vs4-{NONCE}'
+    plan = f'asp-vs4-{NONCE}'
+    source_container, deployment_container = f'vs4-source-{NONCE}', f'vs4-deploy-{NONCE}'
+    subscription = az(['account', 'show'])['id']
+    scope = f'/subscriptions/{subscription}/resourceGroups/{rg}'
+    app_id, plan_id = scope + '/providers/Microsoft.Web/sites/' + app, scope + '/providers/Microsoft.Web/serverfarms/' + plan
+    check('temporary_app_is_distinct', app != main_app)
+    before = production_functions(main_app, rg)
+    REPORT['production_functions_before'] = before
+    connection = az(['storage', 'account', 'show-connection-string', '--name', account,
+                     '--resource-group', rg, '--query', 'connectionString'])
+    SERVICE = BlobServiceClient.from_connection_string(connection)
+    os.environ['STORAGE_CONNECTION_STRING'] = connection
+    os.environ['STORAGE_ACCOUNT_NAME'] = account
+    originals = SERVICE.get_container_client('bronze')
+    snapshot = source_snapshot(originals)
+    check('retained_bronze_snapshot_nonempty', bool(snapshot), {'ingestions': len(snapshot)})
+    by_hour = {}
+    for name in snapshot:
+        by_hour[_source_time(name).replace(minute=0, second=0)] = name
+    pair = next(((by_hour[hour - timedelta(hours=1)], by_hour[hour]) for hour in sorted(by_hour, reverse=True)
+                 if hour - timedelta(hours=1) in by_hour), None)
+    check('two_genuine_consecutive_hour_archives', pair is not None)
+    REPORT['consecutive_sources'] = pair
+    marker = SERVICE.get_blob_client('datalake', OWNED['root'] + '/owner.json')
+    marker.upload_blob(json_bytes({'owner': NONCE}), overwrite=False)
+    OWNED['marker_created'] = True
+    for name in (source_container, deployment_container):
+        SERVICE.create_container(name)
+        OWNED['containers'].append(name)
+        persist()
+    tags = {'purpose': 'silver-s4-validation', 'validation_id': NONCE}
+    OWNED['resource_ids'].append(plan_id)
+    persist()
+    arm('put', plan_id, {'location': location, 'kind': 'functionapp', 'sku': {'name': 'FC1', 'tier': 'FlexConsumption'},
+                         'properties': {'reserved': True}, 'tags': tags})
+    root_a, root_b = OWNED['root'] + '/bootstrap', OWNED['root'] + '/resume'
+    values = {
+        'AzureWebJobsStorage': connection, 'DEPLOYMENT_STORAGE_CONNECTION_STRING': connection,
+        'AzureWebJobsFeatureFlags': 'EnableWorkerIndexing',
+        'STORAGE_CONNECTION_STRING': connection, 'STORAGE_ACCOUNT_NAME': account,
+        'BRONZE_CONTAINER': 'bronze', 'DATALAKE_CONTAINER': 'datalake',
+        'SILVER_ENABLED': 'true', 'SILVER_ROOT': root_a, 'SILVER_TIMER_SCHEDULE': '0 * * * * *',
+        'SILVER_HEALTH_SCHEDULE': '0 * * * * *', 'SILVER_BATCH_SIZE': '100',
+        'SILVER_DISCOVERY_LIMIT': '100', 'SILVER_DISCOVERY_PAGES': '168', 'SILVER_BUDGET_SECONDS': '480',
+        **{f'AzureWebJobs.{name}.Disabled': 'true' for name in before},
+    }
+    OWNED['resource_ids'].append(app_id)
+    persist()
+    arm('put', app_id, {
+        'location': location, 'kind': 'functionapp,linux', 'identity': {'type': 'SystemAssigned'}, 'tags': tags,
+        'properties': {'serverFarmId': plan_id, 'httpsOnly': True,
+                       'functionAppConfig': {
+                           'runtime': {'name': 'python', 'version': '3.11'},
+                           'scaleAndConcurrency': {'maximumInstanceCount': 40, 'instanceMemoryMB': 2048},
+                           'deployment': {'storage': {'type': 'blobContainer',
+                               'value': f'https://{account}.blob.core.windows.net/{deployment_container}',
+                               'authentication': {'type': 'StorageAccountConnectionString',
+                                                  'storageAccountConnectionStringName': 'DEPLOYMENT_STORAGE_CONNECTION_STRING'}}}},
+                       'siteConfig': {'appSettings': [{'name': k, 'value': v} for k, v in values.items()]}},
+    })
+    with tempfile.TemporaryDirectory() as temporary:
+        archive = Path(temporary) / 'functions.zip'
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as target:
+            for file in (BASE / 'functions').rglob('*'):
+                if file.is_file() and '__pycache__' not in file.parts:
+                    target.write(file, file.relative_to(BASE / 'functions'))
+        az(['functionapp', 'deployment', 'source', 'config-zip', '--resource-group', rg, '--name', app,
+            '--src', str(archive), '--build-remote', 'true'], timeout=900)
+    names = wait_for('six_functions_indexed_with_delta_dependencies', lambda: (
+        result if len(result := production_functions(app, rg)) == 6 else None), seconds=180)
+    check('silver_functions_indexed', {'weather_silver_processor', 'silver_health_monitor'} <= set(names))
+    settings = SilverSettings.from_env({**values, 'SILVER_ROOT': root_a})
+    config.BRONZE_CONTAINER = 'bronze'
+    runner_a, store_a, _ = make_runtime(settings)
+    expected_ids = {bronze_identity(name) for name in snapshot}
+    def bootstrapped():
+        state = store_a.read()
+        if not state or state['history']['passes'] < 1 or state['pending']:
+            return None
+        published = publications(runner_a)
+        return (state, published) if expected_ids <= {pub['ingestion_id'] for pub in published} else None
+    state_a, published_a = wait_for('automatic_bootstrap_covers_all_retained_archives', bootstrapped, seconds=600)
+    REPORT['bootstrap'] = {'source_snapshot': len(snapshot), 'publications': len(published_a),
+                           'rows': verify_gold(runner_a, published_a), 'last_run': state_a['last_run']}
+    check('runtime_memory_within_2gb', state_a['last_run']['peak_rss_mb'] < 2048,
+          {'peak_rss_mb': state_a['last_run']['peak_rss_mb']})
+
+    # Phase B: new isolated source/root. Fail after the first genuine Delta commit.
+    app_settings(app, rg, {'BRONZE_CONTAINER': source_container, 'SILVER_ROOT': root_b,
+                          'SILVER_ENABLED': 'false', 'AzureWebJobs.weather_silver_processor.Disabled': 'true'})
+    isolated_source = SERVICE.get_container_client(source_container)
+    raws = {name: originals.get_blob_client(name).download_blob().readall() for name in pair}
+    isolated_source.get_blob_client(pair[0]).upload_blob(raws[pair[0]], overwrite=False)
+    config.BRONZE_CONTAINER = source_container
+    settings_b = SilverSettings.from_env({**values, 'SILVER_ROOT': root_b})
+    runner_b, store_b, _ = make_runtime(settings_b)
+    real_writer = runner_b.writer
+    class InjectedInterruption(RuntimeError):
+        pass
+    class FailSecondTable:
+        table_path = real_writer.table_path
+        def merge(self, name, rows, lease, **kwargs):
+            if name == FORECAST_TABLE:
+                raise InjectedInterruption()
+            return real_writer.merge(name, rows, lease, **kwargs)
+    runner_b.writer = FailSecondTable()
+    seeded = run_tick(runner_b, store_b, settings_b)
+    runner_b.writer = real_writer
+    check('interrupted_ingestion_is_durable_and_unpublished',
+          seeded['technical_errors'] == 1 and pair[0] in store_b.read()['pending']
+          and runner_b.controls.read(publication_name(bronze_identity(pair[0]))) is None)
+    app_settings(app, rg, {'SILVER_ENABLED': 'true', 'AzureWebJobs.weather_silver_processor.Disabled': 'false'})
+    first = wait_for('deployed_timer_resumes_between_table_commits',
+                     lambda: runner_b.controls.read(publication_name(bronze_identity(pair[0]))), seconds=300)
+    first = json.loads(first)
+    check('publication_matches_exact_genuine_source', first['source_sha256'] == transform_bronze(raws[pair[0]], pair[0]).source_sha256)
+    with BlobWriterLease(runner_b.controls.blob('writer.lock')):
+        isolated_source.get_blob_client(pair[1]).upload_blob(raws[pair[1]], overwrite=False)
+        def busy_pending():
+            state = store_b.read()
+            return state if state and pair[1] in state['pending'] and (state.get('last_run') or {}).get('busy', 0) else None
+        wait_for('deployed_timer_retains_busy_writer_as_pending', busy_pending, seconds=240)
+    wait_for('deployed_timer_processes_second_consecutive_hour',
+             lambda: runner_b.controls.read(publication_name(bronze_identity(pair[1]))), seconds=300)
+    complete = publications(runner_b)
+    check('both_consecutive_ingestions_published', {pub['ingestion_id'] for pub in complete} == {bronze_identity(name) for name in pair})
+    REPORT['consecutive_rows'] = verify_gold(runner_b, complete)
+    versions = table_versions(runner_b)
+    last_started = store_b.read()['last_started_at']
+    def replayed():
+        state = store_b.read()
+        return state if (state and state.get('last_finished_at') and state['last_started_at'] > last_started
+                         and parse_timestamp(state['last_finished_at']) >= parse_timestamp(state['last_started_at'])
+                         and state['last_run'].get('started_at') == state['last_started_at']
+                         and not state['pending'] and state['last_run'].get('already_processed', 0) >= 2) else None
+    replay = wait_for('automatic_replay_without_duplicates', replayed, seconds=240)
+    check('replay_preserves_delta_versions', table_versions(runner_b) == versions)
+    def health_snapshot():
+        raw = runner_b.controls.read('runtime/health.json')
+        if not raw:
+            return None
+        health = json.loads(raw)
+        return health if health.get('scheduler') == 'fresh' and health.get('latest_source_at') == replay['latest_source_at'] else None
+    REPORT['health'] = wait_for('independent_health_timer_publishes_snapshot', health_snapshot, seconds=180)
+    REPORT['replay'] = replay['last_run']
+
+    # Validate the actual Azure Monitor API accepts all five KQL rule definitions.
+    component = az(['monitor', 'app-insights', 'component', 'show', '--app', f'appi-{project}-{environment}', '--resource-group', rg])
+    queries = re.findall(r'(\w+) = \{\s+description = .*?\n\s+query\s*=\s*<<-KQL\n(.*?)\n\s+KQL',
+                         (BASE / 'infra/silver_monitoring.tf').read_text(), re.S)
+    check('five_monitor_queries_available', len(queries) == 5)
+    for key, query in queries:
+        resource_id = scope + '/providers/Microsoft.Insights/scheduledQueryRules/' + f'vs4-{NONCE}-{key}'
+        OWNED['resource_ids'].append(resource_id)
+        persist()
+        query = textwrap.dedent(query).replace('func-${var.project_name}-${var.environment}', app)
+        arm('put', resource_id, {'location': location, 'tags': tags, 'properties': {
+            'displayName': f'S4 isolated validation {key}', 'enabled': False, 'severity': 2,
+            'scopes': [component['id']], 'evaluationFrequency': 'PT15M', 'windowSize': 'PT1H',
+            'autoMitigate': True, 'skipQueryValidation': False,
+            'criteria': {'allOf': [{'query': query, 'timeAggregation': 'Count', 'operator': 'GreaterThan',
+                                   'threshold': 0, 'failingPeriods': {'numberOfEvaluationPeriods': 1, 'minFailingPeriodsToAlert': 1}}]},
+        }}, api='2023-12-01')
+        check('azure_accepts_monitor_rule_' + key, True)
+    after = production_functions(main_app, rg)
+    check('main_function_app_unchanged', after == before)
+    REPORT['production_functions_after'] = after
+    REPORT['result'] = 'success'
+    persist()
+
+
+def cleanup():
+    global SERVICE
+    if OWNED.get('owner') != NONCE or OWNED.get('root') != f'silver/validation-s4/{NONCE}':
+        raise RuntimeError('Cleanup ownership mismatch')
+    failures = []
+    for resource_id in reversed(OWNED['resource_ids']):
+        try:
+            check_owned = resource_id.rsplit('/', 1)[-1]
+            if NONCE not in check_owned:
+                raise RuntimeError('Cleanup resource is not owned')
+            api = '2023-12-01' if 'scheduledQueryRules' in resource_id else '2024-04-01'
+            arm('delete', resource_id, api=api)
+            for attempt in range(18):
+                if arm('get', resource_id, api=api) is None:
+                    break
+                time.sleep(5)
+            else:
+                raise RuntimeError('Resource deletion has not completed')
+        except Exception as error:
+            failures.append({'kind': 'resource', 'type': type(error).__name__})
+    if SERVICE is None:
+        account = os.environ['AZURE_STORAGE_ACCOUNT']
+        rg = f"rg-{os.environ['PROJECT_NAME']}-{os.environ['ENVIRONMENT']}"
+        connection = az(['storage', 'account', 'show-connection-string', '--name', account, '--resource-group', rg, '--query', 'connectionString'])
+        SERVICE = BlobServiceClient.from_connection_string(connection)
+    for name in OWNED['containers']:
+        try:
+            if name not in (f'vs4-source-{NONCE}', f'vs4-deploy-{NONCE}'):
+                raise RuntimeError('Cleanup container is not owned')
+            SERVICE.delete_container(name)
+        except ResourceNotFoundError:
+            pass
+        except Exception as error:
+            failures.append({'kind': 'container', 'type': type(error).__name__})
+    if OWNED.get('marker_created'):
+        try:
+            container = SERVICE.get_container_client('datalake')
+            marker = container.get_blob_client(OWNED['root'] + '/owner.json')
+            try:
+                owner = json.loads(marker.download_blob().readall())
+            except ResourceNotFoundError:
+                owner = None
+            if owner is not None:
+                if owner != {'owner': NONCE}:
+                    raise RuntimeError('Cleanup prefix owner changed')
+                names = [item.name for item in container.list_blobs(name_starts_with=OWNED['root'] + '/')]
+                for name in sorted(names, key=lambda n: n.count('/'), reverse=True):
+                    if name != marker.blob_name:
+                        if name.endswith(('/writer.lock', '/runtime/coordinator.json')):
+                            from azure.storage.blob import BlobLeaseClient
+                            blob = container.get_blob_client(name)
+                            if blob.get_blob_properties().lease.status == 'locked':
+                                BlobLeaseClient(blob).break_lease(lease_break_period=0)
+                        container.delete_blob(name)
+                marker.delete_blob()
+            remaining = list(container.list_blobs(name_starts_with=OWNED['root'] + '/'))
+            if remaining:
+                raise RuntimeError('Validation prefix was not completely removed')
+            try:
+                container.delete_blob(OWNED['root'])
+            except ResourceNotFoundError:
+                pass
+        except Exception as error:
+            failures.append({'kind': 'prefix', 'type': type(error).__name__})
+    REPORT['cleanup'] = {'result': 'success' if not failures else 'failed', 'errors': failures}
+    persist()
+    if failures:
+        raise RuntimeError('Some isolated validation resources remain; see manifest')
+
+
+if __name__ == '__main__':
+    try:
+        if '--cleanup' in sys.argv:
+            if MANIFEST_PATH.exists():
+                OWNED = json.loads(MANIFEST_PATH.read_bytes())
+                if REPORT_PATH.exists():
+                    REPORT = json.loads(REPORT_PATH.read_bytes())
+                cleanup()
+        else:
+            persist()
+            try:
+                validate()
+            except Exception as error:
+                REPORT['validation_error_type'] = type(error).__name__
+                persist()
+                raise
+            finally:
+                cleanup()
+    except Exception as error:
+        REPORT['error_type'] = type(error).__name__
+        persist()
+    print(json.dumps({'result': REPORT['result'], 'checks': REPORT['checks'], 'cleanup': REPORT['cleanup'],
+                      'error_type': REPORT.get('error_type'), 'last_cli_error': REPORT.get('last_cli_error')}), flush=True)
+    raise SystemExit(0 if REPORT['result'] == 'success' and REPORT['cleanup'].get('result') == 'success' else 1)
