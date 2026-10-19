@@ -14,8 +14,9 @@ jobs:
       - uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - name: Inspect only the active owned temporary app
+      - name: Read only owned temporary app checkpoints
         env:
           PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
           ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
         run: python scripts/diagnose_s4_owned_app.py

@@ -1,4 +1,5 @@
-import json, os, subprocess, time
+import json, os, subprocess, tempfile
+from pathlib import Path
 NONCE='39342792976-1'
 APP='vs4-'+NONCE
 RG='rg-'+os.environ['PROJECT_NAME']+'-'+os.environ['ENVIRONMENT']
@@ -10,21 +11,24 @@ if code:
     print(json.dumps({'owned_app_exists':False}));raise SystemExit(0)
 if (app.get('tags') or {}).get('validation_id')!=NONCE:
     raise RuntimeError('Ownership mismatch')
-props=app.get('properties',app)
-report={'owned_app_exists':True,'state':props.get('state'),'config':props.get('functionAppConfig')}
+report={'owned_app_exists':True}
 settings,code=az(['functionapp','config','appsettings','list','--name',APP,'--resource-group',RG])
-names=sorted(x['name'] for x in settings or [])
-report['setting_names']=names
-report['config']=None
-required={'AzureWebJobsStorage','DEPLOYMENT_STORAGE_CONNECTION_STRING','SILVER_ROOT','SILVER_TIMER_SCHEDULE','SILVER_HEALTH_SCHEDULE'}
-if code==0 and required<=set(names) and 'QUEUE_NAME' not in names:
-    _,code=az(['functionapp','config','appsettings','set','--name',APP,'--resource-group',RG,'--settings','QUEUE_NAME=vs4-unused-'+NONCE])
-    report['missing_queue_name_repaired']=code==0
-    time.sleep(10)
-functions,code=az(['functionapp','function','list','--name',APP,'--resource-group',RG])
-report['function_names']=sorted(x['name'].rsplit('/',1)[-1] for x in functions or [])
-deploys,code=az(['functionapp','log','deployment','list','--name',APP,'--resource-group',RG])
-report['deployment_listing_available']=code==0
-if isinstance(deploys,list):
-    report['deployments']=[{k:x.get(k) for k in ('id','status','complete','active')} for x in deploys[:3]]
+allowed={'BRONZE_CONTAINER','SILVER_ROOT','SILVER_START_AT','SILVER_ENABLED','AzureWebJobs.weather_silver_processor.Disabled'}
+report['selected_nonsecret_settings']={x['name']:x['value'] for x in settings or [] if x['name'] in allowed}
+for phase in ('bootstrap','resume'):
+    report[phase]={}
+    for filename in ('coordinator.json','health.json'):
+        with tempfile.TemporaryDirectory() as temporary:
+            target=Path(temporary)/'data.json'
+            name='silver/validation-s4/'+NONCE+'/'+phase+'/_control/runtime/'+filename
+            _,code=az(['storage','blob','download','--account-name',os.environ['AZURE_STORAGE_ACCOUNT'],'--auth-mode','key','--container-name','datalake','--name',name,'--file',str(target),'--no-progress'])
+            if code:
+                report[phase][filename]={'exists':False};continue
+            data=json.loads(target.read_bytes())
+        if filename=='health.json':
+            report[phase][filename]=data
+        else:
+            report[phase][filename]={key:data.get(key) for key in ('last_started_at','last_finished_at','last_run','latest_source_at','latest_usable_at')}
+            report[phase][filename]['pending_count']=len(data['pending'])
+            report[phase][filename]['pending_errors']=[{key:job.get(key) for key in ('attempts','last_error_type','next_attempt_at')} for job in list(data['pending'].values())[:3]]
 print(json.dumps(report))
