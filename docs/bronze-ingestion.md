@@ -12,8 +12,47 @@ Avant tout appel externe, l'ingestion valide `WEATHERAPI_KEY`,
 `BRONZE_CONTAINER`. Les trois derniers ont les valeurs par défaut du projet.
 La liste `CITIES` doit être non vide. Une référence Key Vault non résolue est
 refusée. Les valeurs des secrets ne sont pas incluses dans les erreurs de validation.
+Chaque ville doit avoir des coordonnées valides dans `CITY_QUERIES` ; une entrée
+absente ou invalide arrête l'exécution avant les appels externes.
 Les paramètres sont lus dans l'environnement au chargement du module ; redémarrer
 le processus après un changement de configuration.
+
+## Localisation et horizon fournisseur
+
+Les libellés métier restent `Paris`, `Londres` et `Bruxelles` dans Bronze et
+Silver. Le paramètre WeatherAPI `q` utilise des coordonnées explicites :
+
+| Libellé | `q` WeatherAPI | Pays et fuseau attendus en Silver |
+| --- | --- | --- |
+| Paris | `48.8566,2.3522` | France, `Europe/Paris` |
+| Londres | `51.5074,-0.1278` | Royaume-Uni, `Europe/London` |
+| Bruxelles | `50.8503,4.3517` | Belgique, `Europe/Brussels` |
+
+La recherche textuelle `Londres` renvoyait une ville argentine. Les anciennes
+archives et fixtures sont conservées telles quelles ; Silver continue de les
+rejeter avec `location_mismatch`. Le registre Silver vérifie le pays, le fuseau
+et les coordonnées de chaque réponse, indépendamment de son libellé fournisseur.
+Ajouter une ville demande des coordonnées dans la configuration Bronze et une
+entrée dans ce registre.
+
+L'horizon demandé par défaut est désormais **trois dates locales**, jour courant
+inclus (`DEFAULT_FORECAST_DAYS=3`), conforme aux deux captures complètes de l'offre
+actuelle. La précédente demande de sept jours n'en retournait que trois. Ce
+constat ne détermine pas les droits d'un futur abonnement : toute extension
+nécessite de vérifier l'offre et la réponse réelle avant de changer la demande.
+
+Les nouvelles enveloppes Bronze ajoutent `forecast_request: {"days": 3}` pour
+tracer la demande effective. Une valeur explicite passée au collecteur est
+enregistrée à sa place. Ce champ est absent des archives historiques, qui restent
+lisibles. Le JSON fournisseur sous `cities[].data` est conservé sans modification.
+Les jours et heures reçus sont calculés depuis ce JSON en Silver : une demande
+n'est pas une preuve de couverture et ne crée aucun jour manquant.
+
+Trois dates locales ne signifient pas 72 heures futures glissantes : le premier
+jour contient aussi des heures déjà passées et une journée de changement d'heure
+peut compter 23 ou 25 heures. Les 72 heures par ville constatées dans les captures
+sont une observation de ces journées ordinaires, pas une règle imposée à toutes
+les réponses.
 
 ## Statuts
 

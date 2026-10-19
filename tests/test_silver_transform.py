@@ -106,6 +106,16 @@ def test_repeated_exact_bytes_have_identical_results_and_sha(envelope):
     assert _run(envelope, raw=json.dumps(envelope, indent=2).encode()).source_sha256 != first.source_sha256
 
 
+def test_forecast_request_metadata_is_compatible_with_silver(envelope):
+    envelope["forecast_request"] = {"days": 3}
+    result = _run(envelope)
+    assert result.status == "success"
+    assert result.observations.num_rows == 3
+    assert result.forecasts.num_rows == 6
+    # Requesting three days does not create missing forecasts in this one-day fixture.
+    assert result.summary["horizons"]["gb_london"]["received_days"] == 1
+
+
 def test_forecast_revisions_and_repeated_observations_remain_distinct_snapshots(envelope):
     first = _run(envelope)
     second_envelope = deepcopy(envelope)
