@@ -1,30 +1,28 @@
 import json, os, subprocess, tempfile
 from pathlib import Path
 NONCE='39342792976-1'
-APP='vs4-'+NONCE
-RG='rg-'+os.environ['PROJECT_NAME']+'-'+os.environ['ENVIRONMENT']
+ACCOUNT=os.environ['AZURE_STORAGE_ACCOUNT']
 def az(args):
     r=subprocess.run(['az',*args,'--output','json','--only-show-errors'],capture_output=True,text=True,timeout=90)
     return (json.loads(r.stdout) if r.returncode==0 and r.stdout.strip() else None),r.returncode
-app,code=az(['functionapp','show','--name',APP,'--resource-group',RG])
-if code:
-    print(json.dumps({'owned_app_exists':False}));raise SystemExit(0)
-if (app.get('tags') or {}).get('validation_id')!=NONCE:
+def blob(name):
+    with tempfile.TemporaryDirectory() as temporary:
+        target=Path(temporary)/'data.json'
+        _,code=az(['storage','blob','download','--account-name',ACCOUNT,'--auth-mode','key','--container-name','datalake','--name',name,'--file',str(target),'--no-progress'])
+        return json.loads(target.read_bytes()) if code==0 else None
+root='silver/validation-s4/'+NONCE
+owner=blob(root+'/owner.json')
+if owner is None:
+    print(json.dumps({'owned_prefix_present':False}));raise SystemExit(0)
+if owner!={'owner':NONCE}:
     raise RuntimeError('Ownership mismatch')
-report={'owned_app_exists':True}
-settings,code=az(['functionapp','config','appsettings','list','--name',APP,'--resource-group',RG])
-allowed={'BRONZE_CONTAINER','SILVER_ROOT','SILVER_START_AT','SILVER_ENABLED','AzureWebJobs.weather_silver_processor.Disabled'}
-report['selected_nonsecret_settings']={x['name']:x['value'] for x in settings or [] if x['name'] in allowed}
+report={'owned_prefix_present':True}
 for phase in ('bootstrap','resume'):
     report[phase]={}
     for filename in ('coordinator.json','health.json'):
-        with tempfile.TemporaryDirectory() as temporary:
-            target=Path(temporary)/'data.json'
-            name='silver/validation-s4/'+NONCE+'/'+phase+'/_control/runtime/'+filename
-            _,code=az(['storage','blob','download','--account-name',os.environ['AZURE_STORAGE_ACCOUNT'],'--auth-mode','key','--container-name','datalake','--name',name,'--file',str(target),'--no-progress'])
-            if code:
-                report[phase][filename]={'exists':False};continue
-            data=json.loads(target.read_bytes())
+        data=blob(root+'/'+phase+'/_control/runtime/'+filename)
+        if data is None:
+            report[phase][filename]={'exists':False};continue
         if filename=='health.json':
             report[phase][filename]=data
         else:
