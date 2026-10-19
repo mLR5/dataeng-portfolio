@@ -1,0 +1,1994 @@
+[
+  {
+    "fixture": "bronze_success_20261017_real.json",
+    "source_blob": "weather/weatherapi/2026/10/17/23/20261017_230126_82664d4ec7054e89a29dad74b7147012_weather_data.json",
+    "source_sha256": "30648d5cf18c04750ba85dcd33460e856482b8d72bbadea3873934ce5a7f1ff6",
+    "bytes": 350589,
+    "ingestion_id": "20261017_230126_82664d4ec7054e89a29dad74b7147012",
+    "ingestion_timestamp": "2026-10-17T23:01:26.797468+00:00",
+    "status": "success",
+    "cities": [
+      {
+        "query": "Paris",
+        "timezone": "Europe/Paris",
+        "forecast_days": 3,
+        "hours_per_day": [
+          24,
+          24,
+          24
+        ]
+      },
+      {
+        "query": "Londres",
+        "timezone": "America/Argentina/Catamarca",
+        "forecast_days": 3,
+        "hours_per_day": [
+          24,
+          24,
+          24
+        ]
+      },
+      {
+        "query": "Bruxelles",
+        "timezone": "Europe/Brussels",
+        "forecast_days": 3,
+        "hours_per_day": [
+          24,
+          24,
+          24
+        ]
+      }
+    ],
+    "shape": {
+      "$": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.status": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.ingestion_id": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.ingestion_timestamp": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.cities": {
+        "types": [
+          "list"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.cities[]": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].city": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.name": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.region": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.country": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.lat": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.lon": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.tz_id": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.localtime_epoch": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.localtime": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.last_updated_epoch": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.last_updated": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.temp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.temp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.is_day": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.condition": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.condition.text": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.condition.icon": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.condition.code": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.wind_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.wind_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.wind_degree": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.wind_dir": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.pressure_mb": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.pressure_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.precip_mm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.precip_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.humidity": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.cloud": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.feelslike_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.feelslike_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.vis_km": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.vis_miles": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.uv": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.gust_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.gust_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.will_it_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.chance_of_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.will_it_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.chance_of_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.forecast": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.forecast.forecastday": {
+        "types": [
+          "list"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.forecast.forecastday[]": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].date": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].date_epoch": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxtemp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxtemp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.mintemp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.mintemp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgtemp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgtemp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxwind_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxwind_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.totalprecip_mm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.totalprecip_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.totalsnow_cm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgvis_km": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgvis_miles": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avghumidity": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.daily_will_it_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.daily_chance_of_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.daily_will_it_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.daily_chance_of_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.condition": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.condition.text": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.condition.icon": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.condition.code": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.uv": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgwetbulb_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgwetbulb_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxwetbulb_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxwetbulb_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.sunrise": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.sunset": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.moonrise": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.moonset": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.moon_phase": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.moon_illumination": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.is_moon_up": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.is_sun_up": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].hour": {
+        "types": [
+          "list"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].hour[]": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].time_epoch": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].time": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].temp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].temp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].is_day": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].condition": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].condition.text": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].condition.icon": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].condition.code": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wind_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wind_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wind_degree": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wind_dir": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].pressure_mb": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].pressure_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].precip_mm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].precip_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].snow_cm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].humidity": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].cloud": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].feelslike_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].feelslike_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].windchill_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].windchill_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].heatindex_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].heatindex_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].dewpoint_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].dewpoint_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].will_it_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].chance_of_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].will_it_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].chance_of_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].vis_km": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].vis_miles": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].gust_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].gust_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].uv": {
+        "types": [
+          "int",
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wetbulb_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wetbulb_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].status": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.summary": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.summary.total_cities": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.summary.successful": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.summary.failed": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      }
+    }
+  },
+  {
+    "fixture": "bronze_success_20261018_real.json",
+    "source_blob": "weather/weatherapi/2026/10/18/14/20261018_140443_a832e2104ae947e1a909f1dff8c2a518_weather_data.json",
+    "source_sha256": "4e550fd849b6cac6f0457be9391b2f8def9af35c4797e85bb23ee1733c0f1279",
+    "bytes": 350438,
+    "ingestion_id": "20261018_140443_a832e2104ae947e1a909f1dff8c2a518",
+    "ingestion_timestamp": "2026-10-18T14:04:43.949778+00:00",
+    "status": "success",
+    "cities": [
+      {
+        "query": "Paris",
+        "timezone": "Europe/Paris",
+        "forecast_days": 3,
+        "hours_per_day": [
+          24,
+          24,
+          24
+        ]
+      },
+      {
+        "query": "Londres",
+        "timezone": "America/Argentina/Catamarca",
+        "forecast_days": 3,
+        "hours_per_day": [
+          24,
+          24,
+          24
+        ]
+      },
+      {
+        "query": "Bruxelles",
+        "timezone": "Europe/Brussels",
+        "forecast_days": 3,
+        "hours_per_day": [
+          24,
+          24,
+          24
+        ]
+      }
+    ],
+    "shape": {
+      "$": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.status": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.ingestion_id": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.ingestion_timestamp": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.cities": {
+        "types": [
+          "list"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.cities[]": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].city": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.name": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.region": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.country": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.lat": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.lon": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.tz_id": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.localtime_epoch": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.location.localtime": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.last_updated_epoch": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.last_updated": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.temp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.temp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.is_day": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.condition": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.condition.text": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.condition.icon": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.condition.code": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.wind_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.wind_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.wind_degree": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.wind_dir": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.pressure_mb": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.pressure_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.precip_mm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.precip_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.humidity": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.cloud": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.feelslike_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.feelslike_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.vis_km": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.vis_miles": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.uv": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.gust_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.gust_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.will_it_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.chance_of_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.will_it_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.current.chance_of_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.forecast": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.forecast.forecastday": {
+        "types": [
+          "list"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.cities[].data.forecast.forecastday[]": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].date": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].date_epoch": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxtemp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxtemp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.mintemp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.mintemp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgtemp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgtemp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxwind_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxwind_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.totalprecip_mm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.totalprecip_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.totalsnow_cm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgvis_km": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgvis_miles": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avghumidity": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.daily_will_it_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.daily_chance_of_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.daily_will_it_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.daily_chance_of_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.condition": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.condition.text": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.condition.icon": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.condition.code": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.uv": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgwetbulb_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.avgwetbulb_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxwetbulb_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].day.maxwetbulb_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.sunrise": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.sunset": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.moonrise": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.moonset": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.moon_phase": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.moon_illumination": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.is_moon_up": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].astro.is_sun_up": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].hour": {
+        "types": [
+          "list"
+        ],
+        "null_count": 0,
+        "present_count": 9
+      },
+      "$.cities[].data.forecast.forecastday[].hour[]": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].time_epoch": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].time": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].temp_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].temp_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].is_day": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].condition": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].condition.text": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].condition.icon": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].condition.code": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wind_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wind_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wind_degree": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wind_dir": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].pressure_mb": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].pressure_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].precip_mm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].precip_in": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].snow_cm": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].humidity": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].cloud": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].feelslike_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].feelslike_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].windchill_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].windchill_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].heatindex_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].heatindex_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].dewpoint_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].dewpoint_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].will_it_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].chance_of_rain": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].will_it_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].chance_of_snow": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].vis_km": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].vis_miles": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].gust_mph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].gust_kph": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].uv": {
+        "types": [
+          "int",
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wetbulb_c": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].data.forecast.forecastday[].hour[].wetbulb_f": {
+        "types": [
+          "float"
+        ],
+        "null_count": 0,
+        "present_count": 216
+      },
+      "$.cities[].status": {
+        "types": [
+          "str"
+        ],
+        "null_count": 0,
+        "present_count": 3
+      },
+      "$.summary": {
+        "types": [
+          "dict"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.summary.total_cities": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.summary.successful": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      },
+      "$.summary.failed": {
+        "types": [
+          "int"
+        ],
+        "null_count": 0,
+        "present_count": 1
+      }
+    }
+  }
+]

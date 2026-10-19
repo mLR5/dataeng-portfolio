@@ -1,0 +1,234 @@
+{
+  "ingestion_id": "20261018_140000_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "ingestion_timestamp": "2026-10-18T14:00:00Z",
+  "status": "success",
+  "cities": [
+    {
+      "city": "Paris",
+      "status": "success",
+      "data": {
+        "location": {
+          "name": "Paris",
+          "country": "France",
+          "tz_id": "Europe/Paris",
+          "lat": 48.85,
+          "lon": 2.35
+        },
+        "current": {
+          "temp_c": 12.25,
+          "feelslike_c": 11.0,
+          "humidity": 82,
+          "pressure_mb": 1012.0,
+          "wind_kph": 10.8,
+          "wind_degree": 210,
+          "precip_mm": 0.0,
+          "cloud": 50,
+          "condition": {
+            "code": 1003,
+            "text": "Synthetic cloud"
+          },
+          "is_day": 1,
+          "last_updated_epoch": 1792332000
+        },
+        "forecast": {
+          "forecastday": [
+            {
+              "date": "2026-10-18",
+              "hour": [
+                {
+                  "temp_c": 12.25,
+                  "feelslike_c": 11.0,
+                  "humidity": 82,
+                  "pressure_mb": 1012.0,
+                  "wind_kph": 10.8,
+                  "wind_degree": 210,
+                  "precip_mm": 0.0,
+                  "cloud": 50,
+                  "condition": {
+                    "code": 1003,
+                    "text": "Synthetic cloud"
+                  },
+                  "is_day": 1,
+                  "time_epoch": 1792332000,
+                  "chance_of_rain": 20,
+                  "chance_of_snow": 0
+                },
+                {
+                  "temp_c": 12.25,
+                  "feelslike_c": 11.0,
+                  "humidity": 82,
+                  "pressure_mb": 1012.0,
+                  "wind_kph": 10.8,
+                  "wind_degree": 210,
+                  "precip_mm": 0.0,
+                  "cloud": 50,
+                  "condition": {
+                    "code": 1003,
+                    "text": "Synthetic cloud"
+                  },
+                  "is_day": 1,
+                  "time_epoch": 1792335600,
+                  "chance_of_rain": 20,
+                  "chance_of_snow": 0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "city": "Londres",
+      "status": "success",
+      "data": {
+        "location": {
+          "name": "London",
+          "country": "United Kingdom",
+          "tz_id": "Europe/London",
+          "lat": 51.52,
+          "lon": -0.11
+        },
+        "current": {
+          "temp_c": 12.25,
+          "feelslike_c": 11.0,
+          "humidity": 82,
+          "pressure_mb": 1012.0,
+          "wind_kph": 10.8,
+          "wind_degree": 210,
+          "precip_mm": 0.0,
+          "cloud": 50,
+          "condition": {
+            "code": 1003,
+            "text": "Synthetic cloud"
+          },
+          "is_day": 1,
+          "last_updated_epoch": 1792332000
+        },
+        "forecast": {
+          "forecastday": [
+            {
+              "date": "2026-10-18",
+              "hour": [
+                {
+                  "temp_c": 12.25,
+                  "feelslike_c": 11.0,
+                  "humidity": 82,
+                  "pressure_mb": 1012.0,
+                  "wind_kph": 10.8,
+                  "wind_degree": 210,
+                  "precip_mm": 0.0,
+                  "cloud": 50,
+                  "condition": {
+                    "code": 1003,
+                    "text": "Synthetic cloud"
+                  },
+                  "is_day": 1,
+                  "time_epoch": 1792332000,
+                  "chance_of_rain": 20,
+                  "chance_of_snow": 0
+                },
+                {
+                  "temp_c": 12.25,
+                  "feelslike_c": 11.0,
+                  "humidity": 82,
+                  "pressure_mb": 1012.0,
+                  "wind_kph": 10.8,
+                  "wind_degree": 210,
+                  "precip_mm": 0.0,
+                  "cloud": 50,
+                  "condition": {
+                    "code": 1003,
+                    "text": "Synthetic cloud"
+                  },
+                  "is_day": 1,
+                  "time_epoch": 1792335600,
+                  "chance_of_rain": 20,
+                  "chance_of_snow": 0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "city": "Bruxelles",
+      "status": "success",
+      "data": {
+        "location": {
+          "name": "Brussels",
+          "country": "Belgium",
+          "tz_id": "Europe/Brussels",
+          "lat": 50.85,
+          "lon": 4.35
+        },
+        "current": {
+          "temp_c": 12.25,
+          "feelslike_c": 11.0,
+          "humidity": 82,
+          "pressure_mb": 1012.0,
+          "wind_kph": 10.8,
+          "wind_degree": 210,
+          "precip_mm": 0.0,
+          "cloud": 50,
+          "condition": {
+            "code": 1003,
+            "text": "Synthetic cloud"
+          },
+          "is_day": 1,
+          "last_updated_epoch": 1792332000
+        },
+        "forecast": {
+          "forecastday": [
+            {
+              "date": "2026-10-18",
+              "hour": [
+                {
+                  "temp_c": 12.25,
+                  "feelslike_c": 11.0,
+                  "humidity": 82,
+                  "pressure_mb": 1012.0,
+                  "wind_kph": 10.8,
+                  "wind_degree": 210,
+                  "precip_mm": 0.0,
+                  "cloud": 50,
+                  "condition": {
+                    "code": 1003,
+                    "text": "Synthetic cloud"
+                  },
+                  "is_day": 1,
+                  "time_epoch": 1792332000,
+                  "chance_of_rain": 20,
+                  "chance_of_snow": 0
+                },
+                {
+                  "temp_c": 12.25,
+                  "feelslike_c": 11.0,
+                  "humidity": 82,
+                  "pressure_mb": 1012.0,
+                  "wind_kph": 10.8,
+                  "wind_degree": 210,
+                  "precip_mm": 0.0,
+                  "cloud": 50,
+                  "condition": {
+                    "code": 1003,
+                    "text": "Synthetic cloud"
+                  },
+                  "is_day": 1,
+                  "time_epoch": 1792335600,
+                  "chance_of_rain": 20,
+                  "chance_of_snow": 0
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "summary": {
+    "total_cities": 3,
+    "successful": 3,
+    "failed": 0
+  }
+}
