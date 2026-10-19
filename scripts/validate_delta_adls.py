@@ -116,7 +116,8 @@ def main():
         (output / 'validation-report.json').write_text(json.dumps(report, indent=2) + '\n')
         runner = make_azure_runner(root=root)
         require(runner.controls.prefix == root + '/_control')
-        require(runner.writer.root == 'az://datalake/' + root)
+        account = os.environ['AZURE_STORAGE_ACCOUNT']
+        require(runner.writer.root == f'abfss://datalake@{account}.dfs.core.windows.net/{root}')
         report['checks'].append({'name':'isolated_adapter_root', 'passed':True})
 
         stage = 'read_existing_sources'
@@ -271,6 +272,8 @@ def main():
                            storage_options=optimistic.storage_options).to_pyarrow_table().num_rows == 1)
         report['checks'].append({'name':'adls_delta_stale_snapshot_conflict', 'passed':True})
     except Exception as error:
+        failure = {'name':stage, 'passed':False, 'error_type':type(error).__name__}
+        report['checks'].append(failure)
         if owned and container is not None and type(error).__name__ == 'TableNotFoundError':
             # Bounded probes only under the unique root owned by this run.
             report['diagnostic_objects'] = [item.name.removeprefix(prefix)
@@ -312,10 +315,9 @@ def main():
         detail = re.sub(r'https?://[^\s\"\'<>]+', '<storage-url>', detail)
         detail = re.sub(r'(?i)(authorization|accountkey|sharedaccesssignature|sig)[=:][^\s,;}]+', r'\1=<redacted>', detail)
         detail = re.sub(r'(?i)SharedKey\s+[^\s]+', 'SharedKey <redacted>', detail)
-        report['checks'].append({'name':stage, 'passed':False, 'error_type':type(error).__name__,
-                                 'detail':detail[:2500],
-                                 'locations':[f'{Path(frame.filename).name}:{frame.lineno}'
-                                              for frame in traceback.extract_tb(error.__traceback__)]})
+        failure.update(detail=detail[:2500],
+                       locations=[f'{Path(frame.filename).name}:{frame.lineno}'
+                                  for frame in traceback.extract_tb(error.__traceback__)])
     finally:
         if container is not None and owned:
             report['cleanup']['attempted'] = True

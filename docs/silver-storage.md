@@ -2,7 +2,7 @@
 
 Ce lot S3 dépend des contrats et bibliothèques S1 et du transformateur S2.
 Il ne déploie aucune ressource et ne modifie ni Bronze ni l’API météo.
-Les 56 tests S3 exécutés localement utilisent de **vraies transactions Delta**,
+Les 64 tests S3 exécutés localement utilisent de **vraies transactions Delta**,
 y compris sept scénarios avec le transformateur S2 réel (dont les deux fixtures
 dérivées de Bronze S1) ; l’authentification,
 les leases et collisions sur ADLS restent des contrôles d’acceptation Azure S4.
@@ -152,3 +152,18 @@ sous le préfixe possédé et écrit un rapport JSON sans erreur SDK brute ni se
 
 À ce stade, le script est préparé et les tests de garde sont exécutés localement ;
 **aucun résultat Azure n’est revendiqué avant son exécution par le parent**.
+
+## URI ADLS canonique requise
+
+L’adaptateur central construit désormais l’URI
+`abfss://<conteneur>@<compte>.dfs.core.windows.net/<racine-relative>` avec
+`adls_table_root`, après validation des noms et de la racine. Les chemins des
+publications et du plan Gold proviennent de `writer.table_path` et reprennent
+cette même URI. Aucun secret n’y figure.
+
+Le diagnostic Azure du run `39179393152` a montré que, pour le compte ADLS/HNS
+testé avec `deltalake==1.2.1`, l’alias court `az://` échouait lors de la création
+avec « No files in log segment » et aucun commit0 écrit ; l’URI canonique
+`abfss://` créait bien une table vide à la version0. Le préfixe d’essai a été
+nettoyé. Cette preuve valide le choix de l’URI ; le parcours complet Azure
+doit encore être relancé sur ce correctif avant de déclarer S3 accepté sur ADLS.
