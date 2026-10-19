@@ -8,7 +8,7 @@ from uuid import uuid4
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from .config import (
     WEATHERAPI_FORECAST_ENDPOINT, DEFAULT_FORECAST_DAYS, DEFAULT_LANG,
-    API_TIMEOUT_SECONDS, CITIES, RETRY_MAX_ATTEMPTS,
+    API_TIMEOUT_SECONDS, CITIES, CITY_QUERIES, RETRY_MAX_ATTEMPTS,
     RETRY_MIN_WAIT_SECONDS, RETRY_MAX_WAIT_SECONDS, RETRY_AFTER_MAX_SECONDS,
 )
 
@@ -76,7 +76,7 @@ def _log_retry(retry_state):
 def _call_api(city_name, api_key, days, lang):
     response = requests.get(
         WEATHERAPI_FORECAST_ENDPOINT,
-        params={"key": api_key, "q": city_name, "days": days, "lang": lang},
+        params={"key": api_key, "q": CITY_QUERIES[city_name], "days": days, "lang": lang},
         timeout=API_TIMEOUT_SECONDS
     )
     if response.status_code in RETRYABLE_HTTP_STATUSES:
@@ -151,6 +151,7 @@ def get_all_cities_data(api_key, days=DEFAULT_FORECAST_DAYS, lang=DEFAULT_LANG):
         "status": status,
         "ingestion_id": ingestion_id,
         "ingestion_timestamp": ingestion_timestamp,
+        "forecast_request": {"days": days},
         "cities": cities_data,
         "summary": {
             "total_cities": len(CITIES),

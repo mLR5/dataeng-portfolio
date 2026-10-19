@@ -48,6 +48,15 @@ def test_invalid_configuration_stops_before_external_calls(monkeypatch, http_get
     ingestion_io.send.assert_not_called()
 
 
+def test_missing_coordinate_query_stops_before_external_calls(monkeypatch, http_get, ingestion_io):
+    monkeypatch.delitem(config.CITY_QUERIES, "Londres")
+    with pytest.raises(config.ConfigurationError, match="CITY_QUERIES"):
+        weather_ingestion_trigger.execute_ingestion()
+    http_get.assert_not_called()
+    ingestion_io.upload.assert_not_called()
+    ingestion_io.send.assert_not_called()
+
+
 @pytest.mark.parametrize("codes, expected, status_code", [
     ([200, 200, 200], "success", 200),
     ([200, 401, 200], "partial", 200),

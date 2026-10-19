@@ -18,6 +18,41 @@ def test_collection_completeness(http_get, response, statuses, expected, success
     assert data["summary"] == {"total_cities": 3, "successful": successful, "failed": 3 - successful}
     assert len(data["cities"]) == 3
     assert datetime.fromisoformat(data["ingestion_timestamp"]).utcoffset().total_seconds() == 0
+    assert data["forecast_request"] == {"days": 3}
+    assert [call.kwargs["params"]["days"] for call in http_get.call_args_list] == [3, 3, 3]
+
+
+@pytest.mark.parametrize("city, query", [
+    ("Paris", "48.8566,2.3522"),
+    ("Londres", "51.5074,-0.1278"),
+    ("Bruxelles", "50.8503,4.3517"),
+])
+def test_queries_coordinates_and_preserves_city_label_and_raw_payload(http_get, response, city, query):
+    payload = {"location": {"name": "Provider label"}, "forecast": {"forecastday": []}}
+    http_get.side_effect = None
+    http_get.return_value = response(payload=payload)
+    result = weather_api.get_weather_data(city, "test-key")
+    assert http_get.call_args.kwargs["params"] == {"key": "test-key", "q": query, "days": 3, "lang": "fr"}
+    assert result == {"city": city, "data": payload, "status": "success"}
+    assert result["data"] is payload
+
+
+def test_unknown_city_does_not_fall_back_to_an_ambiguous_name(http_get):
+    result = weather_api.get_weather_data("Unknown city", "test-key")
+    assert result == {"city": "Unknown city", "data": None, "status": "error"}
+    http_get.assert_not_called()
+
+
+def test_explicit_forecast_request_is_recorded_without_inventing_received_days(http_get, response):
+    payload = {"forecast": {"forecastday": [{"date": "2026-10-19", "hour": []}]}}
+    http_get.side_effect = None
+    http_get.return_value = response(payload=payload)
+    data = weather_api.get_all_cities_data("test-key", days=2, lang="en")
+    assert data["forecast_request"] == {"days": 2}
+    assert [item["city"] for item in data["cities"]] == ["Paris", "Londres", "Bruxelles"]
+    assert all(len(item["data"]["forecast"]["forecastday"]) == 1 for item in data["cities"])
+    assert all(call.kwargs["params"]["days"] == 2 and call.kwargs["params"]["lang"] == "en"
+               for call in http_get.call_args_list)
 
 
 def test_ingestion_ids_differ_even_at_the_same_instant(monkeypatch, http_get, response):

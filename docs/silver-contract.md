@@ -103,9 +103,12 @@ L'epoch prime sur les heures locales ; les anciennes dates Bronze naïves sont
 UTC selon leur contrat existant. Un repli vers une heure locale est possible
 seulement si le fuseau donne un instant unique : les heures ambiguës ou
 inexistantes sont rejetées. Une journée DST peut compter 23 ou 25 heures ;
-le bilan mesure la couverture effective sans imposer 24. Les sept jours
-**demandés** à WeatherAPI ne garantissent pas sept jours **reçus** : le bilan
-conserve jours/heures réellement observés, sans en inventer.
+le bilan mesure la couverture effective sans imposer 24. Le collecteur demande
+désormais trois dates locales, jour courant inclus, et trace cette demande dans
+`forecast_request.days` ; les archives antérieures ne portent pas ce champ.
+Les sept jours demandés dans les anciennes captures n'en avaient retourné que
+trois. Le bilan conserve toujours les jours/heures réellement reçus, sans en
+inventer ni appliquer la configuration actuelle aux historiques.
 
 ## Statuts, rejets et bilan
 
@@ -177,8 +180,9 @@ Constats sur les deux réponses complètes :
 - **Anomalie source : `Londres` est résolue vers l'Argentine**, fuseau
   `America/Argentina/Catamarca`, et non vers London. Les fixtures gardent cette
   anomalie intacte. Le registre rejette cette ville avec `location_mismatch` ;
-  Paris et Bruxelles sont acceptées. La correction de la requête d'origine est
-  un chantier Bronze distinct ; ne jamais renommer ces valeurs en London.
+  Paris et Bruxelles sont acceptées. Le collecteur utilise désormais des
+  coordonnées explicites pour Londres (voir [contrat source Bronze](bronze-ingestion.md#localisation-et-horizon-fournisseur)) ;
+  ne jamais renommer les anciennes valeurs argentines en London.
 
 La régression versionnée S1 confirme la géographie erronée et les empreintes.
 Les extraits doivent donner à S2 un résultat `partial`, **2 observations et

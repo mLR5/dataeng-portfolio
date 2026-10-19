@@ -106,5 +106,11 @@ signale trois appels HTTP réussis. Les fixtures et les historiques restent
 intacts : aucune donnée argentine n'est renommée en observation londonienne.
 L'horizon réellement reçu est de trois jours, 72 heures par ville valide.
 
+La collecte courante demande désormais trois dates locales et utilise des
+coordonnées explicites pour les trois villes. Son champ additionnel
+`forecast_request.days` est compatible avec le transformateur ; il ne remplace
+pas la mesure des jours et heures réellement présents dans la réponse et ne
+change pas le traitement des archives historiques.
+
 Les tests unitaires n'établissent pas la compatibilité ADLS ni le chargement du
 paquet Azure Functions : leur acceptation relève de S1/S3 puis de S4 sur Azure.
