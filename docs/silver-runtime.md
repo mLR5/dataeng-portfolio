@@ -64,6 +64,10 @@ est de dix minutes et la prochaine invocation reprend les travaux durables.
 | `SILVER_PENDING_AGE_MINUTES` | `60` | Seuil d'ancienneté du backlog |
 | `SILVER_EXPECTED_FORECAST_DAYS` | `3` | Couverture attendue de la dernière collecte |
 
+La variable GitHub `SILVER_ENABLED` alimente aussi Terraform (`silver_enabled`)
+pour conserver l’interrupteur lors des déploiements suivants. Une modification
+manuelle d’un paramètre géré par Terraform peut être rétablie au prochain apply.
+
 Les deux paramètres de calendrier doivent être définis pour indexer les nouveaux
 bindings ; Terraform les fournit. Les SDKs utilisent la connexion de stockage
 existante ou la chaîne de credentials Azure de S3. Les valeurs de connexion ne

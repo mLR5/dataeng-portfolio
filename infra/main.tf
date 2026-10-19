@@ -84,7 +84,7 @@ module "function_app" {
   queue_name            = module.storage.queue_name
   datalake_container    = "datalake"
   additional_app_settings = {
-    SILVER_ENABLED         = "true"
+    SILVER_ENABLED         = tostring(var.silver_enabled)
     SILVER_TIMER_SCHEDULE  = "0 */5 * * * *"
     SILVER_HEALTH_SCHEDULE = "0 */15 * * * *"
   }

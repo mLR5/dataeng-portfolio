@@ -70,6 +70,12 @@ variable "silver_monitoring_enabled" {
   default     = true
 }
 
+variable "silver_enabled" {
+  description = "Enable automatic Silver batches; false keeps Bronze active and emits disabled health signals."
+  type        = bool
+  default     = true
+}
+
 variable "silver_alert_action_group_ids" {
   description = "Existing action groups for Silver. Empty: Azure alerts without external notifications."
   type        = list(string)
