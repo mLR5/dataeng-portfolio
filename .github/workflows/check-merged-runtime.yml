@@ -1,0 +1,38 @@
+name: Verify Merged Silver Runtime State
+on:
+  push:
+    branches: [validation/post-silver-merge]
+    paths:
+      - '.github/workflows/check-merged-runtime.yml'
+      - 'scripts/check_merged_runtime.py'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Read existing runtime and Silver state
+        env:
+          PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
+          ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+          AZURE_STORAGE_ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+          VALIDATED_MAIN: '5ec9f0a0c5228e267bb33471b4e65cf5239e3eb3'
+        run: python scripts/check_merged_runtime.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: merged-silver-runtime-state
+          path: merged-runtime-report.json
+          if-no-files-found: warn
+          retention-days: 30
