@@ -17,7 +17,7 @@ import uuid
 sys.path.insert(0, str(Path.cwd() / 'functions'))
 
 import pyarrow as pa
-from azure.storage.blob import BlobServiceClient
+from azure.storage.blob import BlobServiceClient, BlobLeaseClient
 from deltalake import CommitProperties, DeltaTable, write_deltalake
 from deltalake.exceptions import CommitFailedError
 
@@ -225,7 +225,7 @@ def main():
         original_loss_merge = loss_runner.writer.merge
         def lose_after_first(name, *args, **kwargs):
             commit = original_loss_merge(name, *args, **kwargs)
-            loss_runner.controls.blob('writer.lock').break_lease(lease_break_period=0)
+            BlobLeaseClient(loss_runner.controls.blob('writer.lock')).break_lease(lease_break_period=0)
             args[1].assert_held()  # actual server rejects the broken lease ID
             return commit
         loss_runner.writer.merge = lose_after_first
@@ -335,7 +335,7 @@ def main():
                         client = container.get_blob_client(name)
                         properties = client.get_blob_properties()
                         if properties.lease.status == 'locked':
-                            client.break_lease(lease_break_period=0)
+                            BlobLeaseClient(client).break_lease(lease_break_period=0)
                         client.delete_blob(delete_snapshots='include')
                         deleted += 1
                     except Exception as error:
