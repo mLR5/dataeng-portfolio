@@ -336,7 +336,7 @@ def test_azure_adapter_uses_existing_connection_without_exposing_key(monkeypatch
                        'AccountName=testsilveraccount;AccountKey=not-a-real-key;EndpointSuffix=core.windows.net')
     monkeypatch.setattr(BlobServiceClient, 'from_connection_string', Mock(return_value=service))
     runner = make_azure_runner(transform=lambda *_: transformed())
-    assert runner.writer.root == f'az://datalake/{silver_root()}'
+    assert runner.writer.root == f'abfss://datalake@testsilveraccount.dfs.core.windows.net/{silver_root()}'
     assert runner.writer.storage_options['azure_storage_account_name'] == 'testsilveraccount'
     assert runner.writer.storage_options['azure_storage_account_key'] == 'not-a-real-key'
     assert 'not-a-real-key' not in runner.writer.root
@@ -457,5 +457,32 @@ def test_azure_adapter_routes_tables_and_control_to_injected_validation_root(mon
     monkeypatch.setattr(BlobServiceClient, 'from_connection_string', Mock(return_value=service))
     root = 'silver/_validation/s1-s3-' + 'a' * 32
     runner = make_azure_runner(root=root, transform=lambda *_: transformed())
-    assert runner.writer.root == 'az://datalake/' + root
+    assert runner.writer.root == 'abfss://datalake@testsilveraccount.dfs.core.windows.net/' + root
     assert runner.controls.prefix == root + '/_control'
+
+
+@pytest.mark.parametrize('account,container,root', [
+    ('UPPERCASE', 'datalake', 'silver/test'),
+    ('a' * 25, 'datalake', 'silver/test'),
+    ('testaccount', 'container/other', 'silver/test'),
+    ('testaccount', 'bad--name', 'silver/test'),
+    ('testaccount', 'bad_name', 'silver/test'),
+    ('testaccount', 'a', 'silver/test'),
+    ('testaccount', 'datalake', 'silver/../prod'),
+])
+def test_canonical_adls_root_refuses_url_components_and_invalid_azure_names(account, container, root):
+    from shared.silver_runner import adls_table_root
+    with pytest.raises(ValueError):
+        adls_table_root(account, container, root)
+
+
+def test_canonical_adls_root_is_shared_by_writer_and_publication_paths(monkeypatch):
+    from shared.silver_runner import adls_table_root, make_azure_runner
+    from azure.storage.blob import BlobServiceClient
+    monkeypatch.setenv('STORAGE_CONNECTION_STRING', 'AccountName=testsilveraccount;AccountKey=test-key')
+    monkeypatch.setattr(BlobServiceClient, 'from_connection_string', Mock(return_value=Mock()))
+    root = 'silver/_validation/s1-s3-' + 'c' * 32
+    runner = make_azure_runner(root=root, transform=lambda *_: transformed())
+    expected = adls_table_root('testsilveraccount', 'datalake', root)
+    assert runner.writer.root == expected
+    assert all(runner.writer.table_path(name) == expected + '/' + name for name in TABLE_SCHEMAS)

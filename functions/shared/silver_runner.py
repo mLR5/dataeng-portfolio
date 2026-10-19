@@ -124,6 +124,16 @@ def _relative_silver_root(value):
     return value
 
 
+def adls_table_root(account, container, root):
+    """Canonical HNS URI; the short az:// alias fails creation with Delta 1.2.1."""
+    if not isinstance(account, str) or not re.fullmatch(r'[a-z0-9]{3,24}', account):
+        raise ValueError('Invalid Azure storage account name')
+    if not isinstance(container, str) or not re.fullmatch(r'[a-z0-9](?:[a-z0-9]|-(?!-)){1,61}[a-z0-9]', container):
+        raise ValueError('Invalid Azure storage container name')
+    root = _relative_silver_root(root)
+    return f'abfss://{container}@{account}.dfs.core.windows.net/{root}'
+
+
 def make_azure_runner(*, transform=None, root=None):
     """Use existing Azure connection or the default Azure credential chain.
 
@@ -163,7 +173,7 @@ def make_azure_runner(*, transform=None, root=None):
     container = service.get_container_client(config.DATALAKE_CONTAINER)
     controls = AzureControlStore(container, f'{root}/_control')
     writer = DeltaSnapshotWriter(
-        f'az://{config.DATALAKE_CONTAINER}/{root}', storage_options=options,
+        adls_table_root(account, config.DATALAKE_CONTAINER, root), storage_options=options,
     )
     def prepare():
         if credential is not None:
