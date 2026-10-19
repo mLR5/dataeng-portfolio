@@ -40,10 +40,14 @@ REPORT_PATH = Path('silver-s4-report.json')
 MANIFEST_PATH = Path('silver-s4-resources.json')
 NONCE = os.environ.get('GITHUB_RUN_ID', '') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
 if not re.fullmatch(r'\d+-\d+', NONCE):
-    raise RuntimeError('Run this validation from its GitHub workflow')
+    raise ValidationError('Run this validation from its GitHub workflow')
 REPORT = {'result': 'failed', 'commit': os.environ.get('GITHUB_SHA'), 'checks': [], 'cleanup': {}}
 OWNED = {'owner': NONCE, 'resource_ids': [], 'containers': [], 'root': f'silver/validation-s4/{NONCE}'}
 SERVICE = None
+
+
+class ValidationError(RuntimeError):
+    pass
 
 
 def persist():
@@ -68,7 +72,7 @@ def az(args, *, timeout=180, absent_ok=False):
         codes = re.findall(r'\(([A-Za-z][A-Za-z0-9]+)\)|"code"\s*:\s*"([A-Za-z][A-Za-z0-9]+)"', result.stderr)
         codes = [first or second for first, second in codes]
         REPORT['last_cli_error'] = {'command': args[:2], 'codes': codes[:3]}
-        raise RuntimeError('Azure CLI command failed; raw output withheld')
+        raise ValidationError('Azure CLI command failed; raw output withheld')
     return json.loads(result.stdout) if result.stdout.strip() else None
 
 
@@ -104,8 +108,11 @@ def app_settings(app, rg, values):
 def source_snapshot(container):
     names = []
     for index, item in enumerate(container.list_blobs(name_starts_with='weather/weatherapi/')):
+        REPORT['source_objects_scanned'] = index + 1
+        if index == 0:
+            REPORT['first_source_object'] = item.name
         if index >= 5000:
-            raise RuntimeError('Validation source snapshot exceeds its 5000-object bound')
+            raise ValidationError('Validation source snapshot exceeds its 5000-object bound')
         try:
             stamp = _source_time(item.name)
             if item.name.startswith(f'weather/weatherapi/{stamp:%Y/%m/%d/%H}/'):
@@ -167,6 +174,8 @@ def validate():
     os.environ['STORAGE_CONNECTION_STRING'] = connection
     os.environ['STORAGE_ACCOUNT_NAME'] = account
     originals = SERVICE.get_container_client('bronze')
+    REPORT['stage'] = 'inventory_source'
+    persist()
     snapshot = source_snapshot(originals)
     check('retained_bronze_snapshot_nonempty', bool(snapshot), {'ingestions': len(snapshot)})
     by_hour = {}
@@ -186,6 +195,8 @@ def validate():
     tags = {'purpose': 'silver-s4-validation', 'validation_id': NONCE}
     OWNED['resource_ids'].append(plan_id)
     persist()
+    REPORT['stage'] = 'create_flex_plan'
+    persist()
     arm('put', plan_id, {'location': location, 'kind': 'functionapp', 'sku': {'name': 'FC1', 'tier': 'FlexConsumption'},
                          'properties': {'reserved': True}, 'tags': tags})
     root_a, root_b = OWNED['root'] + '/bootstrap', OWNED['root'] + '/resume'
@@ -201,6 +212,8 @@ def validate():
     }
     OWNED['resource_ids'].append(app_id)
     persist()
+    REPORT['stage'] = 'create_flex_app'
+    persist()
     arm('put', app_id, {
         'location': location, 'kind': 'functionapp,linux', 'identity': {'type': 'SystemAssigned'}, 'tags': tags,
         'properties': {'serverFarmId': plan_id, 'httpsOnly': True,
@@ -213,6 +226,8 @@ def validate():
                                                   'storageAccountConnectionStringName': 'DEPLOYMENT_STORAGE_CONNECTION_STRING'}}}},
                        'siteConfig': {'appSettings': [{'name': k, 'value': v} for k, v in values.items()]}},
     })
+    REPORT['stage'] = 'remote_build_and_deploy'
+    persist()
     with tempfile.TemporaryDirectory() as temporary:
         archive = Path(temporary) / 'functions.zip'
         with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as target:
@@ -234,6 +249,8 @@ def validate():
             return None
         published = publications(runner_a)
         return (state, published) if expected_ids <= {pub['ingestion_id'] for pub in published} else None
+    REPORT['stage'] = 'bootstrap'
+    persist()
     state_a, published_a = wait_for('automatic_bootstrap_covers_all_retained_archives', bootstrapped, seconds=600)
     REPORT['bootstrap'] = {'source_snapshot': len(snapshot), 'publications': len(published_a),
                            'rows': verify_gold(runner_a, published_a), 'last_run': state_a['last_run']}
@@ -327,13 +344,13 @@ def validate():
 def cleanup():
     global SERVICE
     if OWNED.get('owner') != NONCE or OWNED.get('root') != f'silver/validation-s4/{NONCE}':
-        raise RuntimeError('Cleanup ownership mismatch')
+        raise ValidationError('Cleanup ownership mismatch')
     failures = []
     for resource_id in reversed(OWNED['resource_ids']):
         try:
             check_owned = resource_id.rsplit('/', 1)[-1]
             if NONCE not in check_owned:
-                raise RuntimeError('Cleanup resource is not owned')
+                raise ValidationError('Cleanup resource is not owned')
             api = '2023-12-01' if 'scheduledQueryRules' in resource_id else '2024-04-01'
             arm('delete', resource_id, api=api)
             for attempt in range(18):
@@ -341,7 +358,7 @@ def cleanup():
                     break
                 time.sleep(5)
             else:
-                raise RuntimeError('Resource deletion has not completed')
+                raise ValidationError('Resource deletion has not completed')
         except Exception as error:
             failures.append({'kind': 'resource', 'type': type(error).__name__})
     if SERVICE is None:
@@ -352,7 +369,7 @@ def cleanup():
     for name in OWNED['containers']:
         try:
             if name not in (f'vs4-source-{NONCE}', f'vs4-deploy-{NONCE}'):
-                raise RuntimeError('Cleanup container is not owned')
+                raise ValidationError('Cleanup container is not owned')
             SERVICE.delete_container(name)
         except ResourceNotFoundError:
             pass
@@ -368,7 +385,7 @@ def cleanup():
                 owner = None
             if owner is not None:
                 if owner != {'owner': NONCE}:
-                    raise RuntimeError('Cleanup prefix owner changed')
+                    raise ValidationError('Cleanup prefix owner changed')
                 names = [item.name for item in container.list_blobs(name_starts_with=OWNED['root'] + '/')]
                 for name in sorted(names, key=lambda n: n.count('/'), reverse=True):
                     if name != marker.blob_name:
@@ -381,7 +398,7 @@ def cleanup():
                 marker.delete_blob()
             remaining = list(container.list_blobs(name_starts_with=OWNED['root'] + '/'))
             if remaining:
-                raise RuntimeError('Validation prefix was not completely removed')
+                raise ValidationError('Validation prefix was not completely removed')
             try:
                 container.delete_blob(OWNED['root'])
             except ResourceNotFoundError:
@@ -391,7 +408,7 @@ def cleanup():
     REPORT['cleanup'] = {'result': 'success' if not failures else 'failed', 'errors': failures}
     persist()
     if failures:
-        raise RuntimeError('Some isolated validation resources remain; see manifest')
+        raise ValidationError('Some isolated validation resources remain; see manifest')
 
 
 if __name__ == '__main__':
@@ -408,6 +425,8 @@ if __name__ == '__main__':
                 validate()
             except Exception as error:
                 REPORT['validation_error_type'] = type(error).__name__
+                if isinstance(error, (ValidationError, AssertionError)):
+                    REPORT['validation_error_reason'] = str(error)
                 persist()
                 raise
             finally:
@@ -416,5 +435,9 @@ if __name__ == '__main__':
         REPORT['error_type'] = type(error).__name__
         persist()
     print(json.dumps({'result': REPORT['result'], 'checks': REPORT['checks'], 'cleanup': REPORT['cleanup'],
-                      'error_type': REPORT.get('error_type'), 'last_cli_error': REPORT.get('last_cli_error')}), flush=True)
-    raise SystemExit(0 if REPORT['result'] == 'success' and REPORT['cleanup'].get('result') == 'success' else 1)
+                      'error_type': REPORT.get('error_type'), 'last_cli_error': REPORT.get('last_cli_error'),
+                      'stage': REPORT.get('stage'), 'reason': REPORT.get('validation_error_reason'),
+                      'source_objects_scanned': REPORT.get('source_objects_scanned'),
+                      'first_source_object': REPORT.get('first_source_object')}), flush=True)
+    success = REPORT['cleanup'].get('result') == 'success' and ('--cleanup' in sys.argv or REPORT['result'] == 'success')
+    raise SystemExit(0 if success else 1)

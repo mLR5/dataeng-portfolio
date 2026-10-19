@@ -5,7 +5,8 @@ Il ne déploie aucune ressource et ne modifie ni Bronze ni l’API météo.
 Les 64 tests S3 exécutés localement utilisent de **vraies transactions Delta**,
 y compris sept scénarios avec le transformateur S2 réel (dont les deux fixtures
 dérivées de Bronze S1) ; l’authentification,
-les leases et collisions sur ADLS restent des contrôles d’acceptation Azure S4.
+les leases et collisions sur ADLS sont aussi vérifiés dans l’acceptation Azure.
+Le timer, son checkpoint et la supervision sont décrits dans [S4](silver-runtime.md).
 
 ## Deux tables communes aux ingestions
 
