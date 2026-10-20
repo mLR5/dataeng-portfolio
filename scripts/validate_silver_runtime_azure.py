@@ -220,8 +220,8 @@ def validate():
         OWNED['containers'].append(name)
         persist()
     queue_service = QueueServiceClient.from_connection_string(connection)
-    queue_a, queue_b = f'vs4-work-a-{NONCE}', f'vs4-work-b-{NONCE}'
-    for name in (queue_a, queue_b):
+    queue_a = queue_b = f'vs4-work-a-{NONCE}'
+    for name in (queue_a,):
         OWNED['queues'].append(name)
         persist()
         queue_service.create_queue(name)
@@ -307,9 +307,16 @@ def validate():
     check('runtime_memory_within_2gb', state_a['last_run']['peak_rss_mb'] < 2048,
           {'peak_rss_mb': state_a['last_run']['peak_rss_mb']})
 
-    # Phase B: new isolated source/root. Fail after the first genuine Delta commit.
+    # Phase B changes imported source settings. Stop the owned app before
+    # switching roots so no old instance can consume/ack a new wake-up while
+    # SILVER_ENABLED or the source binding is still propagating. Reuse the same
+    # queue binding: this also avoids a scale-controller remapping race.
+    az(['functionapp', 'stop', '--name', app, '--resource-group', rg])
+    wait_for('owned_app_stopped_before_phase_switch',
+             lambda: (arm('get', app_id) or {}).get('properties', {}).get('state') == 'Stopped', seconds=120)
+    queue_service.get_queue_client(queue_a).clear_messages()
     app_settings(app, rg, {'BRONZE_CONTAINER': source_container, 'SILVER_ROOT': root_b,
-                          'SILVER_START_AT': '', 'SILVER_ENABLED': 'false',
+                          'SILVER_START_AT': '', 'SILVER_ENABLED': 'true',
                           'AzureWebJobs.weather_silver_processor.Disabled': 'true', 'SILVER_QUEUE_NAME': queue_b})
     isolated_source = SERVICE.get_container_client(source_container)
     raws = {name: originals.get_blob_client(name).download_blob().readall() for name in pair}
@@ -334,8 +341,11 @@ def validate():
     check('interrupted_ingestion_is_durable_and_unpublished',
           seeded['technical_errors'] == 1 and pair[0] in store_b.read()['pending']
           and runner_b.controls.read(publication_name(bronze_identity(pair[0]))) is None)
-    # The daily opener stays disabled: only deployed queue continuations can resume.
-    app_settings(app, rg, {'SILVER_ENABLED': 'true'})
+    # Start only after the checkpoint and settings are complete. The daily
+    # opener stays disabled: only deployed queue continuations can resume.
+    az(['functionapp', 'start', '--name', app, '--resource-group', rg])
+    wait_for('owned_app_running_with_resume_configuration',
+             lambda: (arm('get', app_id) or {}).get('properties', {}).get('state') == 'Running', seconds=120)
     queue_service.get_queue_client(queue_b).send_message(wakeup_body(first_end))
     first = wait_for('deployed_queue_resumes_between_table_commits',
                      lambda: runner_b.controls.read(publication_name(bronze_identity(pair[0]))), seconds=300)
