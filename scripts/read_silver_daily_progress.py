@@ -1,4 +1,6 @@
 import json,os,subprocess
+from functools import partial
+print = partial(print, flush=True)
 from azure.storage.blob import BlobServiceClient
 from azure.storage.queue import QueueServiceClient
 from azure.core.exceptions import ResourceNotFoundError
@@ -26,6 +28,8 @@ for phase in ('bootstrap','resume'):
   print('CHECKPOINT',phase,'absent');continue
  print('CHECKPOINT',phase,'invocations',s.get('invocations'),'target_end',s.get('target_end'),'pending',len(s.get('pending',{})),'finished',s.get('last_finished_at'),'next_wake',s.get('next_wake_at'),'daily_completed',s.get('daily',{}).get('completed_end'),'history_passes',s.get('history',{}).get('passes'))
  last=s.get('last_run') or {}
+ print('PENDING_DETAIL',phase,[(n,j.get('attempts'),j.get('last_error_type'),j.get('next_attempt_at')) for n,j in list(s.get('pending',{}).items())[:10]])
+ print('LAST_STARTED',phase,s.get('last_started_at'))
  print('LAST_RUN',phase,'outcome',last.get('outcome'),'published',last.get('published'),'replay',last.get('already_processed'),'errors',last.get('error_types'),'next_delay',last.get('next_delay_seconds'))
 for lane in ('a','b'):
  try:p=queues.get_queue_client(f'vs4-work-{lane}-{nonce}').get_queue_properties();print('QUEUE',lane,'approximate_messages',p.approximate_message_count)
