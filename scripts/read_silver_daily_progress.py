@@ -12,6 +12,8 @@ print('OWNED_APP_EXISTS',bool(app))
 if app:
  if app.get('tags',{}).get('validation_id')!=nonce:raise RuntimeError('Owner mismatch')
  print('APP_STATE',app.get('state') or app.get('properties',{}).get('state'))
+ selected=az(['functionapp','config','appsettings','list','-g',rg,'-n',f'vs4-{nonce}','--query',"[?name=='SILVER_ENABLED' || name=='SILVER_QUEUE_NAME' || name=='SILVER_ROOT' || name=='BRONZE_CONTAINER'].[name,value]"])
+ print('SAFE_SETTINGS',selected)
  funcs=az(['functionapp','function','list','-g',rg,'-n',f'vs4-{nonce}'])
  print('FUNCTIONS',','.join(f['name'].split('/')[-1] for f in (funcs or [])))
 connection=az(['storage','account','show-connection-string','-g',rg,'-n',os.environ['AZURE_STORAGE_ACCOUNT'],'--query','connectionString'])
@@ -28,3 +30,7 @@ for phase in ('bootstrap','resume'):
 for lane in ('a','b'):
  try:p=queues.get_queue_client(f'vs4-work-{lane}-{nonce}').get_queue_properties();print('QUEUE',lane,'approximate_messages',p.approximate_message_count)
  except ResourceNotFoundError:print('QUEUE',lane,'absent')
+
+for lane in ('a','b'):
+ try:p=queues.get_queue_client(f'vs4-work-{lane}-{nonce}-poison').get_queue_properties();print('POISON_QUEUE',lane,p.approximate_message_count)
+ except ResourceNotFoundError:print('POISON_QUEUE',lane,'absent')
