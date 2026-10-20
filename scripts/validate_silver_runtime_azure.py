@@ -31,7 +31,7 @@ from shared import config
 from shared.claim_check import parse_timestamp
 from shared.silver_contract import FORECAST_TABLE, TABLE_SCHEMAS
 from shared.silver_discovery import discover_bronze
-from shared.silver_lease import BlobWriterLease
+from shared.silver_lease import BlobWriterLease, LeaseBusy
 from shared.silver_publication import json_bytes, published_read_plan, publication_name
 from shared.silver_runner import bronze_identity
 from shared.silver_runtime import STATE_NAME, _source_time, batch_cutoff, earliest_bronze, make_runtime, run_tick
@@ -156,6 +156,8 @@ def production_functions(app, rg):
 
 def validate():
     global SERVICE
+    recovery_only = os.environ.get('SILVER_VALIDATION_MODE') == 'recovery_only'
+    REPORT['validation_mode'] = 'recovery_only' if recovery_only else 'bootstrap_and_recovery'
     project, environment = os.environ['PROJECT_NAME'], os.environ['ENVIRONMENT']
     account = os.environ['AZURE_STORAGE_ACCOUNT']
     location = os.environ.get('AZURE_LOCATION') or 'francecentral'
@@ -202,7 +204,7 @@ def validate():
     cutoff = max(_source_time(retained[-1]) - timedelta(hours=48), _source_time(retained[-min(80, len(retained))]))
     snapshot = [name for name in retained if _source_time(name) >= cutoff]
     REPORT['source_scope'] = {'ingestions_in_48h_window': len(retained),
-                              'validation_from': cutoff.isoformat(), 'selected_ingestions': len(snapshot),
+                              'validation_from': cutoff.isoformat(), 'selected_ingestions': 2 if recovery_only else len(snapshot),
                               'inventory_to': batch_end.isoformat(), 'maximum_window_hours': 48}
     check('retained_bronze_snapshot_nonempty', bool(snapshot), {'ingestions': len(snapshot)})
     by_hour = {}
@@ -245,6 +247,12 @@ def validate():
         'SILVER_DISCOVERY_LIMIT': '100', 'SILVER_DISCOVERY_PAGES': '168', 'SILVER_BUDGET_SECONDS': '480',
         **{f'AzureWebJobs.{name}.Disabled': 'true' for name in before},
     }
+    if recovery_only:
+        # A fresh app starts directly on the recovery source/root. No old daily
+        # opener or delayed bootstrap wake-up can advance this test's horizon.
+        values.update(BRONZE_CONTAINER=source_container, SILVER_ROOT=root_b, SILVER_START_AT='',
+                      SILVER_TIMER_SCHEDULE='0 0 0 1 1 *',
+                      **{'AzureWebJobs.weather_silver_processor.Disabled': 'true'})
     OWNED['resource_ids'].append(app_id)
     persist()
     REPORT['stage'] = 'create_flex_app'
@@ -284,40 +292,41 @@ def validate():
         return result if len(result) == 7 else None
     names = wait_for('seven_functions_indexed_with_delta_dependencies', indexed_functions, seconds=180)
     check('silver_functions_indexed', {'weather_silver_processor', 'silver_batch_worker', 'silver_health_monitor'} <= set(names))
-    settings = SilverSettings.from_env({**values, 'SILVER_ROOT': root_a})
-    config.BRONZE_CONTAINER = 'bronze'
-    runner_a, store_a, _ = make_runtime(settings)
-    expected_ids = {bronze_identity(name) for name in snapshot}
-    def bootstrapped():
-        state = store_a.read()
-        if (not state or state['history']['passes'] < 1 or state['pending']
-                or not state.get('last_run') or not state.get('last_finished_at')
-                or parse_timestamp(state['last_finished_at']) < parse_timestamp(state['last_started_at'])):
-            return None
-        published = publications(runner_a)
-        return (state, published) if expected_ids <= {pub['ingestion_id'] for pub in published} else None
-    REPORT['stage'] = 'bootstrap'
-    persist()
-    state_a, published_a = wait_for('automatic_bootstrap_covers_all_retained_archives', bootstrapped, seconds=600)
-    REPORT['bootstrap'] = {'source_snapshot': len(snapshot), 'publications': len(published_a),
-                           'rows': verify_gold(runner_a, published_a), 'last_run': state_a['last_run'], 'worker_invocations': state_a['invocations']}
-    check('queue_continuations_finish_more_than_one_lot', state_a['invocations'] > 1 and state_a['next_wake_at'] is None)
-    check('only_closed_collection_days_published', all(_source_time(pub['source_blob']) < batch_end for pub in published_a))
-    check('daily_completion_recorded', state_a['daily']['completed_end'] == batch_end.isoformat())
-    check('runtime_memory_within_2gb', state_a['last_run']['peak_rss_mb'] < 2048,
-          {'peak_rss_mb': state_a['last_run']['peak_rss_mb']})
+    if not recovery_only:
+        settings = SilverSettings.from_env({**values, 'SILVER_ROOT': root_a})
+        config.BRONZE_CONTAINER = 'bronze'
+        runner_a, store_a, _ = make_runtime(settings)
+        expected_ids = {bronze_identity(name) for name in snapshot}
+        def bootstrapped():
+            state = store_a.read()
+            if (not state or state['history']['passes'] < 1 or state['pending']
+                    or not state.get('last_run') or not state.get('last_finished_at')
+                    or parse_timestamp(state['last_finished_at']) < parse_timestamp(state['last_started_at'])):
+                return None
+            published = publications(runner_a)
+            return (state, published) if expected_ids <= {pub['ingestion_id'] for pub in published} else None
+        REPORT['stage'] = 'bootstrap'
+        persist()
+        state_a, published_a = wait_for('automatic_bootstrap_covers_all_retained_archives', bootstrapped, seconds=600)
+        REPORT['bootstrap'] = {'source_snapshot': len(snapshot), 'publications': len(published_a),
+                               'rows': verify_gold(runner_a, published_a), 'last_run': state_a['last_run'], 'worker_invocations': state_a['invocations']}
+        check('queue_continuations_finish_more_than_one_lot', state_a['invocations'] > 1 and state_a['next_wake_at'] is None)
+        check('only_closed_collection_days_published', all(_source_time(pub['source_blob']) < batch_end for pub in published_a))
+        check('daily_completion_recorded', state_a['daily']['completed_end'] == batch_end.isoformat())
+        check('runtime_memory_within_2gb', state_a['last_run']['peak_rss_mb'] < 2048,
+              {'peak_rss_mb': state_a['last_run']['peak_rss_mb']})
 
-    # Phase B changes imported source settings. Stop the owned app before
-    # switching roots so no old instance can consume/ack a new wake-up while
-    # SILVER_ENABLED or the source binding is still propagating. Reuse the same
-    # queue binding: this also avoids a scale-controller remapping race.
-    az(['functionapp', 'stop', '--name', app, '--resource-group', rg])
-    wait_for('owned_app_stopped_before_phase_switch',
-             lambda: (arm('get', app_id) or {}).get('properties', {}).get('state') == 'Stopped', seconds=120)
-    queue_service.get_queue_client(queue_a).clear_messages()
-    app_settings(app, rg, {'BRONZE_CONTAINER': source_container, 'SILVER_ROOT': root_b,
-                          'SILVER_START_AT': '', 'SILVER_ENABLED': 'true',
-                          'AzureWebJobs.weather_silver_processor.Disabled': 'true', 'SILVER_QUEUE_NAME': queue_b})
+        # Phase B changes imported source settings. Stop the owned app before
+        # switching roots so no old instance can consume/ack a new wake-up while
+        # SILVER_ENABLED or the source binding is still propagating. Reuse the same
+        # queue binding: this also avoids a scale-controller remapping race.
+        az(['functionapp', 'stop', '--name', app, '--resource-group', rg])
+        wait_for('owned_app_stopped_before_phase_switch',
+                 lambda: (arm('get', app_id) or {}).get('properties', {}).get('state') == 'Stopped', seconds=120)
+        queue_service.get_queue_client(queue_a).clear_messages()
+        app_settings(app, rg, {'BRONZE_CONTAINER': source_container, 'SILVER_ROOT': root_b,
+                              'SILVER_START_AT': '', 'SILVER_ENABLED': 'true',
+                              'AzureWebJobs.weather_silver_processor.Disabled': 'true', 'SILVER_QUEUE_NAME': queue_b})
     isolated_source = SERVICE.get_container_client(source_container)
     raws = {name: originals.get_blob_client(name).download_blob().readall() for name in pair}
     isolated_source.get_blob_client(pair[0]).upload_blob(raws[pair[0]], overwrite=False)
@@ -343,9 +352,10 @@ def validate():
           and runner_b.controls.read(publication_name(bronze_identity(pair[0]))) is None)
     # Start only after the checkpoint and settings are complete. The daily
     # opener stays disabled: only deployed queue continuations can resume.
-    az(['functionapp', 'start', '--name', app, '--resource-group', rg])
-    wait_for('owned_app_running_with_resume_configuration',
-             lambda: (arm('get', app_id) or {}).get('properties', {}).get('state') == 'Running', seconds=120)
+    if not recovery_only:
+        az(['functionapp', 'start', '--name', app, '--resource-group', rg])
+        wait_for('owned_app_running_with_resume_configuration',
+                 lambda: (arm('get', app_id) or {}).get('properties', {}).get('state') == 'Running', seconds=120)
     queue_service.get_queue_client(queue_b).send_message(wakeup_body(first_end))
     first = wait_for('deployed_queue_resumes_between_table_commits',
                      lambda: runner_b.controls.read(publication_name(bronze_identity(pair[0]))), seconds=300)
@@ -353,17 +363,36 @@ def validate():
     check('publication_matches_exact_genuine_source', first['source_sha256'] == transform_bronze(raws[pair[0]], pair[0]).source_sha256)
     with BlobWriterLease(runner_b.controls.blob('writer.lock')):
         isolated_source.get_blob_client(pair[1]).upload_blob(raws[pair[1]], overwrite=False)
+        def prepare_second_request():
+            try:
+                with store_b.session() as session:
+                    state = session.read()
+                    # A delayed opener from the accelerated bootstrap can have
+                    # completed this UTC day before this deliberately late copy.
+                    # Make its real reconciliation due rather than pretending
+                    # a duplicate daily request should reset a finished window.
+                    if parse_timestamp(state['target_end']) >= second_end and state['daily']['window'] is None:
+                        state['history']['next_reconcile_at'] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+                        session.save(state)
+                        REPORT['second_collection_mode'] = 'late_arrival_reconciliation'
+                    else:
+                        REPORT['second_collection_mode'] = 'next_daily_batch'
+                return True
+            except LeaseBusy:
+                return False
+        wait_for('second_collection_request_prepared', prepare_second_request, seconds=60)
         queue_service.get_queue_client(queue_b).send_message(wakeup_body(second_end))
         def busy_pending():
             state = store_b.read()
-            return state if state and pair[1] in state['pending'] and (state.get('last_run') or {}).get('busy', 0) else None
+            job = (state or {}).get('pending', {}).get(pair[1])
+            return state if job and job.get('last_error_type') == 'LeaseBusy' and job['attempts'] > 0 else None
         wait_for('deployed_queue_retains_busy_writer_as_pending', busy_pending, seconds=240)
     wait_for('next_daily_batch_processes_second_consecutive_hour',
              lambda: runner_b.controls.read(publication_name(bronze_identity(pair[1]))), seconds=300)
     complete = publications(runner_b)
     check('both_consecutive_ingestions_published', {pub['ingestion_id'] for pub in complete} == {bronze_identity(name) for name in pair})
     REPORT['consecutive_rows'] = verify_gold(runner_b, complete)
-    wait_for('second_daily_batch_finished', lambda: (lambda state: state if state and not state['pending'] and state['next_wake_at'] is None else None)(store_b.read()), seconds=180)
+    wait_for('second_collection_batch_finished', lambda: (lambda state: state if state and not state['pending'] and state['next_wake_at'] is None else None)(store_b.read()), seconds=180)
     versions = table_versions(runner_b)
     # Make the weekly reconciliation due in this owned test checkpoint. Its
     # execution still runs exclusively through the deployed queue trigger.
