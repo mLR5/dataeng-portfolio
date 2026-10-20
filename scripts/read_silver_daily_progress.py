@@ -38,3 +38,6 @@ for lane in ('a','b'):
 for lane in ('a','b'):
  try:p=queues.get_queue_client(f'vs4-work-{lane}-{nonce}-poison').get_queue_properties();print('POISON_QUEUE',lane,p.approximate_message_count)
  except ResourceNotFoundError:print('POISON_QUEUE',lane,'absent')
+
+from datetime import datetime, timezone
+print("OBSERVED_AT_UTC", datetime.now(timezone.utc).isoformat())
