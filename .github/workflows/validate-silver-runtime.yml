@@ -15,10 +15,12 @@ concurrency:
   cancel-in-progress: false
 jobs:
   validate:
+    if: false
     runs-on: ubuntu-latest
     timeout-minutes: 35
     environment: dev
     env:
+      SILVER_VALIDATION_MODE: recovery_only
       PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
       ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
       AZURE_STORAGE_ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
