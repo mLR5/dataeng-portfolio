@@ -1,7 +1,7 @@
 locals {
   silver_alerts = {
     freshness = {
-      description = "Silver sans donnees utilisables recentes, coordinateur arrete ou sonde en erreur."
+      description = "Batch Silver J+1 incomplet apres son echeance, donnees manquantes ou continuation arretee."
       query       = <<-KQL
         traces
         | where cloud_RoleName == "func-${var.project_name}-${var.environment}"
@@ -34,7 +34,7 @@ locals {
       KQL
     }
     quality = {
-      description = "Derniere collecte Silver partielle, rejetee, vide ou horizon incomplet."
+      description = "Derniere collecte publiee dans le batch Silver partielle, rejetee, vide ou horizon incomplet."
       query       = <<-KQL
         traces
         | where cloud_RoleName == "func-${var.project_name}-${var.environment}"

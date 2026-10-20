@@ -1,7 +1,8 @@
-"""Bounded automatic Bronze discovery, durable pending work and retry scheduling."""
+"""Daily J+1 batches, bounded durable continuations and historical catch-up."""
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import math
 import resource
 import time
 
@@ -59,13 +60,14 @@ def earliest_bronze(container, *, cursor=None, limit=1000):
 
 def new_state(settings):
     return {
-        'schema_version': 1, 'transform_version': TRANSFORM_VERSION,
+        'schema_version': 2, 'transform_version': TRANSFORM_VERSION,
         'root': settings.root, 'bronze_container': config.BRONZE_CONTAINER,
         'configured_start_at': settings.start_at,
-        'recent': None,
+        'target_end': None, 'daily': {'start_at': None, 'window': None, 'scanned_end': None, 'completed_end': None},
+        'next_wake_at': None,
         'history': {'origin': None, 'horizon': None, 'next_at': None, 'window': None, 'passes': 0,
-                    'bootstrap_cursor': None},
-        'pending': {}, 'last_started_at': None, 'last_finished_at': None,
+                    'bootstrap_cursor': None, 'scan_done': False, 'completed_at': None, 'next_reconcile_at': None},
+        'pending': {}, 'invocations': 0, 'last_started_at': None, 'last_finished_at': None,
         'latest_source_at': None, 'latest_usable_at': None,
         'latest_publication_status': None, 'latest_quality_degraded': None,
         'last_run': None,
@@ -82,7 +84,7 @@ def validate_state(state, settings):
         raise ValueError('Invalid runtime pending state')
     for path, job in pending.items():
         _source_time(path)
-        if (not isinstance(job, dict) or job.get('lane') not in ('recent', 'history')
+        if (not isinstance(job, dict) or job.get('lane') not in ('daily', 'history')
                 or type(job.get('attempts')) is not int or job['attempts'] < 0):
             raise ValueError('Invalid runtime pending job')
         _utc(job['first_seen_at'])
@@ -92,10 +94,19 @@ def validate_state(state, settings):
         raise ValueError('Invalid runtime history state')
     if history.get('bootstrap_cursor') is not None and not isinstance(history['bootstrap_cursor'], str):
         raise ValueError('Invalid runtime bootstrap cursor')
-    for stamp in ('origin', 'horizon', 'next_at'):
+    for stamp in ('origin', 'horizon', 'next_at', 'completed_at', 'next_reconcile_at'):
         if history.get(stamp) is not None:
             _utc(history[stamp])
-    for window in (state.get('recent'), history.get('window')):
+    daily = state.get('daily')
+    if not isinstance(daily, dict) or type(history.get('scan_done')) is not bool:
+        raise ValueError('Invalid daily batch state')
+    for stamp in ('target_end', 'next_wake_at'):
+        if state.get(stamp) is not None:
+            _utc(state[stamp])
+    for stamp in ('start_at', 'scanned_end', 'completed_end'):
+        if daily.get(stamp) is not None:
+            _utc(daily[stamp])
+    for window in (daily.get('window'), history.get('window')):
         if window is not None:
             if not isinstance(window, dict) or _utc(window['start']) >= _utc(window['end']):
                 raise ValueError('Invalid runtime discovery window')
@@ -138,25 +149,51 @@ def _window(start, end):
     return {'start': start.isoformat(), 'end': end.isoformat(), 'cursor': None}
 
 
+def batch_cutoff(now, settings):
+    """Exclusive UTC midnight of the latest batch scheduled at batch_hour_utc."""
+    now = _utc(now)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight if now >= midnight + timedelta(hours=settings.batch_hour_utc) else midnight - timedelta(days=1)
+
+
+def _request_batch(state, cutoff, settings):
+    previous = state['target_end']
+    if previous is not None and cutoff <= _utc(previous):
+        return
+    daily = state['daily']
+    start = cutoff - timedelta(days=settings.replay_days)
+    if previous is not None:
+        # Cover every missed day, even after a long shutdown.
+        start = min(start, _utc(previous) - timedelta(days=settings.replay_days - 1))
+    if daily['window'] is not None:
+        start = min(start, _utc(daily['window']['start']))
+    if settings.start_at:
+        start = max(start, _utc(settings.start_at))
+    state['target_end'] = cutoff.isoformat()
+    daily.update(start_at=start.isoformat(), window=_window(start, cutoff) if start < cutoff else None,
+                 scanned_end=cutoff.isoformat() if start >= cutoff else None)
+
+
+def _history_due(state, settings, now):
+    history = state['history']
+    return (history['horizon'] is not None or history['bootstrap_cursor'] is not None or
+            history['passes'] == 0 or _utc(history['next_reconcile_at']) <= now)
+
+
 def _discover(state, lane, runner, settings, now, session, report):
     pending = state['pending']
-    # One failing historical batch cannot consume the recent lane's capacity.
     capacity = settings.pending_limit // 2 - sum(job['lane'] == lane for job in pending.values())
     if capacity <= 0 or len(pending) >= settings.pending_limit:
         report['backpressure'] = True
         return
     history = state['history']
-    if lane == 'recent':
-        if state['recent'] is None:
-            start = now - timedelta(hours=settings.lookback_hours)
-            lower = settings.start_at or history['origin']
-            if lower is not None:
-                start = max(start, _utc(lower))
-            if start >= now:
-                return
-            state['recent'] = _window(start, now)
-        window = state['recent']
+    if lane == 'daily':
+        window = state['daily']['window']
+        if window is None:
+            return
     else:
+        if not _history_due(state, settings, now) or history['scan_done']:
+            return
         if history['horizon'] is None:
             if settings.start_at:
                 first = _utc(settings.start_at)
@@ -165,13 +202,17 @@ def _discover(state, lane, runner, settings, now, session, report):
                 history['bootstrap_cursor'] = page['continuation']
                 report['inspected'] += page['inspected']
                 first = page['earliest']
-            if first is None or first >= now:
+                if first is None and page['continuation'] is not None:
+                    _save(session, state)
+                    return
+            cutoff = _utc(state['target_end'])
+            if first is None or first >= cutoff:
+                history.update(horizon=cutoff.isoformat(), scan_done=True)
                 _save(session, state)
                 return
-            # Refresh the earliest name on every pass: older late arrivals are covered.
             if history['origin'] is not None:
                 first = min(first, _utc(history['origin']))
-            history.update(origin=first.isoformat(), horizon=now.isoformat(), next_at=first.isoformat())
+            history.update(origin=first.isoformat(), horizon=cutoff.isoformat(), next_at=first.isoformat())
         if history['window'] is None:
             start = _utc(history['next_at'])
             history['window'] = _window(start, min(start + timedelta(days=7), _utc(history['horizon'])))
@@ -189,15 +230,40 @@ def _discover(state, lane, runner, settings, now, session, report):
             report['discovered'] += 1
     window['cursor'] = page.continuation
     if page.continuation is None:
-        if lane == 'recent':
-            state['recent'] = None
+        if lane == 'daily':
+            state['daily'].update(window=None, scanned_end=window['end'])
         else:
             history['next_at'] = window['end']
             history['window'] = None
             if _utc(history['next_at']) >= _utc(history['horizon']):
-                history.update(horizon=None, next_at=None, passes=history['passes'] + 1)
-    # Pending and its advanced cursor are one atomic, lease-fenced replacement.
+                history['scan_done'] = True
+    # Persist the candidate list and its cursor together before any Delta write.
     _save(session, state)
+
+
+def _finish_scans(state, settings, now):
+    daily, history = state['daily'], state['history']
+    if daily['scanned_end'] is not None and not any(
+            job['lane'] == 'daily' or _utc(daily['start_at']) <= _source_time(path) < _utc(daily['scanned_end'])
+            for path, job in state['pending'].items()):
+        daily['completed_end'] = daily['scanned_end']
+    if history['scan_done'] and not any(
+            _source_time(path) < _utc(history['horizon']) for path in state['pending']):
+        history.update(horizon=None, next_at=None, window=None, bootstrap_cursor=None, scan_done=False,
+                       passes=history['passes'] + 1, completed_at=now.isoformat(),
+                       next_reconcile_at=(now + timedelta(days=settings.reconcile_days)).isoformat())
+
+
+def _continuation_delay(state, settings, now, report):
+    delays = [max(0, math.ceil((_utc(job['next_attempt_at']) - now).total_seconds()))
+              for job in state['pending'].values()]
+    for lane in ('daily', 'history'):
+        needs_scan = (state['daily']['window'] is not None if lane == 'daily' else
+                      _history_due(state, settings, now) and not state['history']['scan_done'])
+        capacity = settings.pending_limit // 2 - sum(job['lane'] == lane for job in state['pending'].values())
+        if needs_scan and capacity > 0 and len(state['pending']) < settings.pending_limit:
+            delays.append(30 if report['discovery_errors'] else 0)
+    return min(3600, min(delays)) if delays else None
 
 
 def _record_publication(state, result, settings):
@@ -221,10 +287,13 @@ def _record_publication(state, result, settings):
                      latest_quality_degraded=status != 'success' or not complete_horizon)
 
 
-def run_tick(runner, store, settings, *, now=None, monotonic=time.monotonic):
+def run_tick(runner, store, settings, *, now=None, cutoff=None, monotonic=time.monotonic):
     if not settings.enabled:
         return {'outcome': 'disabled'}
     now = _utc(now or datetime.now(timezone.utc))
+    cutoff = batch_cutoff(now, settings) if cutoff is None else _utc(cutoff)
+    if cutoff != cutoff.replace(hour=0, minute=0, second=0, microsecond=0) or cutoff > batch_cutoff(now, settings):
+        raise ValueError('Batch cutoff must be an eligible UTC midnight')
     began = monotonic()
     report = {'outcome': 'ok', 'root': settings.root, 'started_at': now.isoformat(), 'published': 0, 'already_processed': 0,
               'busy': 0, 'technical_errors': 0, 'discovery_errors': 0, 'discovered': 0,
@@ -233,9 +302,11 @@ def run_tick(runner, store, settings, *, now=None, monotonic=time.monotonic):
         with store.session() as session:
             state = session.read()
             state = new_state(settings) if state is None else validate_state(state, settings)
+            _request_batch(state, cutoff, settings)
+            state['invocations'] += 1
             state['last_started_at'] = now.isoformat()
             _save(session, state)
-            for lane in ('recent', 'history'):
+            for lane in ('daily', 'history'):
                 if monotonic() - began >= settings.budget_seconds:
                     break
                 # A discovery error must not starve already durable pending jobs.
@@ -254,7 +325,7 @@ def run_tick(runner, store, settings, *, now=None, monotonic=time.monotonic):
             due = sorted(
                 (path for path, job in state['pending'].items() if _utc(job['next_attempt_at']) <= now),
                 key=lambda path: (state['pending'][path]['attempts'] > 0,
-                                  state['pending'][path]['lane'] != 'recent',
+                                  state['pending'][path]['lane'] != 'daily',
                                   state['pending'][path]['first_seen_at'], path),
             )
             for path in due[:settings.batch_size]:
@@ -293,12 +364,18 @@ def run_tick(runner, store, settings, *, now=None, monotonic=time.monotonic):
             report['peak_rss_mb'] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
             if report['technical_errors'] or report['discovery_errors']:
                 report['outcome'] = 'partial'
-            state['last_finished_at'] = (now + timedelta(milliseconds=report['duration_ms'])).isoformat()
+            finished = now + timedelta(milliseconds=report['duration_ms'])
+            _finish_scans(state, settings, finished)
+            delay = _continuation_delay(state, settings, finished, report)
+            state['next_wake_at'] = (finished + timedelta(seconds=delay)).isoformat() if delay is not None else None
+            report.update(next_delay_seconds=delay, cutoff_utc=state['target_end'],
+                          daily_completed_end=state['daily']['completed_end'], history_passes=state['history']['passes'])
+            state['last_finished_at'] = finished.isoformat()
             state['last_run'] = report
             _save(session, state)
             return report
     except LeaseBusy:
-        return {'outcome': 'busy', 'reason': 'coordinator_lease_held'}
+        return {'outcome': 'busy', 'reason': 'coordinator_lease_held', 'next_delay_seconds': 30, 'cutoff_utc': cutoff.isoformat()}
 
 
 class StatePersistenceError(RuntimeError):

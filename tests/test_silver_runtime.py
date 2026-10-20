@@ -19,8 +19,8 @@ from shared.silver_settings import SilverSettings
 from shared.silver_runner import ProcessResult
 from test_silver_discovery import PagedContainer, START, path
 
-NOW = START + timedelta(hours=3)
-SETTINGS = SilverSettings(root='silver/test/runtime', discovery_limit=10, discovery_pages=48)
+NOW = START + timedelta(days=1, hours=5)
+SETTINGS = SilverSettings(root='silver/test/runtime', discovery_limit=10, discovery_pages=48, replay_days=1)
 
 
 class MemoryStore:
@@ -166,20 +166,21 @@ def test_discovery_failure_does_not_block_durable_pending():
 def test_full_reconciliation_finds_a_late_file_older_than_recent_window():
     store = MemoryStore()
     instance = runner([path(0, 0)])
-    settings = replace(SETTINGS, lookback_hours=1)
+    settings = SETTINGS
     run_tick(instance, store, settings, now=NOW)
     instance.bronze.names.append(path(0, 1))
-    report = run_tick(instance, store, settings, now=NOW + timedelta(minutes=5))
+    report = run_tick(instance, store, settings, now=NOW + timedelta(days=8))
     assert report['published'] == 2  # fake runner also republishes the original; real runner no-ops
     assert not store.state['pending']
 
 
-def test_reconciliation_expands_origin_for_an_even_earlier_late_archive():
+def test_weekly_reconciliation_expands_origin_for_an_even_earlier_archive():
     store = MemoryStore()
     instance = runner([path(1, 0)])
     run_tick(instance, store, SETTINGS, now=NOW)
     instance.bronze.names.append(path(0, 0))
-    run_tick(instance, store, SETTINGS, now=NOW + timedelta(minutes=5))
+    for offset in range(6):
+        run_tick(instance, store, SETTINGS, now=NOW + timedelta(days=8, minutes=offset))
     assert store.state['history']['origin'] == START.isoformat()
 
 
@@ -191,8 +192,8 @@ def test_full_history_scan_crosses_seven_day_windows_and_empty_weeks():
         committed.add(name)
         return ProcessResult('published', name, publication(name))
     instance = runner([old, later], process)
-    settings = replace(SETTINGS, discovery_pages=168, lookback_hours=1)
-    now = datetime(2026, 11, 3, tzinfo=timezone.utc)
+    settings = replace(SETTINGS, discovery_pages=168, replay_days=1)
+    now = datetime(2026, 11, 3, 5, tzinfo=timezone.utc)
     for tick in range(3):
         run_tick(instance, store, settings, now=now + timedelta(minutes=5 * tick))
     assert committed == {old, later}
@@ -252,18 +253,22 @@ def test_changed_root_start_or_source_state_is_never_silently_reset():
         run_tick(runner([]), store, replace(SETTINGS, start_at=START.isoformat()), now=NOW)
 
 
-def test_health_uses_source_time_and_detects_stopped_scheduler_and_backlog():
+def test_daily_health_is_fresh_while_idle_and_expires_at_next_deadline():
     store = MemoryStore()
-    run_tick(runner([path(2, 0)]), store, SETTINGS, now=NOW)
+    run_tick(runner([path(23, 0)]), store, SETTINGS, now=NOW)
     assert check_silver_health(store, SETTINGS, now=NOW)['freshness'] == 'fresh'
-    late = check_silver_health(store, SETTINGS, now=NOW + timedelta(minutes=25))
-    assert late['scheduler'] == 'stale' and late['freshness'] == 'stale'
+    before_deadline = START + timedelta(days=2, hours=3, minutes=59)
+    assert check_silver_health(store, SETTINGS, now=before_deadline)['freshness'] == 'fresh'
+    after_deadline = START + timedelta(days=2, hours=4)
+    assert check_silver_health(store, SETTINGS, now=after_deadline)['freshness'] == 'stale'
+    store.state['next_wake_at'] = (NOW - timedelta(minutes=21)).isoformat()
+    assert check_silver_health(store, SETTINGS, now=NOW)['scheduler'] == 'stale'
     store.state['pending'][path(0, 0)] = {'lane': 'history', 'attempts': 5, 'first_seen_at': START.isoformat(),
                                        'next_attempt_at': NOW.isoformat()}
     assert check_silver_health(store, SETTINGS, now=NOW)['backlog_stale'] is True
 
 
-def test_recent_replay_of_old_data_never_makes_silver_fresh():
+def test_replay_time_does_not_freshen_old_source_data():
     store = MemoryStore()
     run_tick(runner([path(0, 0)]), store, SETTINGS, now=NOW)
     assert check_silver_health(store, SETTINGS, now=NOW)['freshness'] == 'stale'
@@ -336,7 +341,7 @@ def test_bootstrap_cursor_survives_more_than_one_thousand_legacy_objects():
     store = MemoryStore()
     names = [f'weather/weatherapi/0000/{i:04d}' for i in range(1001)] + [path(1, 0)]
     instance = runner(names)
-    settings = replace(SETTINGS, lookback_hours=1)
+    settings = SETTINGS
     first = run_tick(instance, store, settings, now=NOW)
     assert first['technical_errors'] == first['discovery_errors'] == 0
     assert store.state['history']['bootstrap_cursor'] is not None
@@ -362,8 +367,8 @@ def test_oversized_checkpoint_is_rejected():
 
 def test_worker_timer_redacts_technical_exception(monkeypatch, caplog):
     import weather_silver_processor
-    monkeypatch.setattr(weather_silver_processor, 'make_runtime', Mock(side_effect=OSError('secret-SAS')))
-    with pytest.raises(RuntimeError, match='Silver batch failed'):
+    monkeypatch.setattr(weather_silver_processor, 'enqueue_wakeup', Mock(side_effect=OSError('secret-SAS')))
+    with pytest.raises(RuntimeError, match='Silver daily scheduling failed'):
         weather_silver_processor.main(None)
     assert 'OSError' in caplog.text and 'secret-SAS' not in caplog.text
 
@@ -400,11 +405,12 @@ def test_real_delta_partial_commit_resumes_and_two_ingestions_replay_without_dup
             return real_writer.merge(table_name, rows, lease, **kwargs)
     instance = SilverRunner(container, ControlStore(), FailBetweenTables(), TestLease, transform_bronze)
     store = MemoryStore()
-    now = START + timedelta(hours=12)
-    first = run_tick(instance, store, SETTINGS, now=now)
+    settings = replace(SETTINGS, replay_days=2)
+    now = NOW
+    first = run_tick(instance, store, settings, now=now)
     assert first['technical_errors'] == 1 and name in store.state['pending']
     assert not any(key.startswith('publications/') for key in instance.controls.values)
-    resumed = run_tick(instance, store, SETTINGS, now=now + timedelta(minutes=1))
+    resumed = run_tick(instance, store, settings, now=now + timedelta(minutes=1))
     assert resumed['published'] == 1 and not store.state['pending']
 
     second = json.loads(raw)
@@ -412,9 +418,9 @@ def test_real_delta_partial_commit_resumes_and_two_ingestions_replay_without_dup
     second_name = bronze_blob_name(second['ingestion_id'], second['ingestion_timestamp'])
     sources[second_name] = json.dumps(second).encode()
     container.names.append(second_name)
-    run_tick(instance, store, SETTINGS, now=now + timedelta(minutes=5))
+    run_tick(instance, store, settings, now=now + timedelta(days=1))
     versions = {table: DeltaTable(real_writer.table_path(table)).version() for table in TABLE_SCHEMAS}
     assert sorted(DeltaTable(real_writer.table_path(table)).to_pyarrow_table().num_rows
                   for table in TABLE_SCHEMAS) == [2, 4]
-    run_tick(instance, store, SETTINGS, now=now + timedelta(minutes=10))
+    run_tick(instance, store, settings, now=now + timedelta(days=1, minutes=5))
     assert {table: DeltaTable(real_writer.table_path(table)).version() for table in TABLE_SCHEMAS} == versions

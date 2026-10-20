@@ -1,190 +1,182 @@
-# S4 : alimentation automatique et exploitation Silver Delta
+# S4 : batch Silver quotidien J+1
 
-Après fusion et déploiement, `weather_silver_processor` traite Bronze toutes les
-cinq minutes et `silver_health_monitor` le contrôle indépendamment toutes les
-quinze minutes. S4 ne rappelle pas WeatherAPI et ne supprime aucun fichier Bronze.
-Les deux tables et la barrière de publication S3 sont conservées.
+Après fusion et déploiement, `weather_silver_processor` ouvre un batch **chaque
+jour à 02 h UTC**. Le 24 à 02 h, il demande les archives **collectées le 23**,
+avec une borne exclusive au 24 à 00 h UTC. Une prévision collectée le 23 pour
+le 25 reste incluse : on filtre la collecte, jamais la date météo visée.
+Les collectes Bronze restent horaires et indépendantes. Aucun appel WeatherAPI
+ni suppression d'archive Bronze n'est effectué par Silver.
 
-## Exécution et état durable
+## Stockage : deux dossiers métier et un dossier technique
 
-L'état est sous `<SILVER_ROOT>/_control/runtime/coordinator.json`. Le blob JSON
-est lui-même protégé par un lease renouvelé ; chaque remplacement porte ce lease,
-contrôlé par Azure. Un ancien coordinateur ne peut pas écraser l'état après perte
-de propriété. Le lease S3 et les transactions Delta protègent séparément les
-écritures métier, y compris face à un backfill lancé en parallèle.
+Le stockage est le compte **ADLS Gen2 existant**, conteneur **`datalake`**.
+Silver est un ensemble de fichiers dans ce compte, pas une nouvelle ressource
+Azure ni une base SQL provisionnée séparément.
 
-Deux parcours bornés partagent les travaux en attente :
+```text
+datalake/silver/weatherapi/schema=v1/transform=1.0.0/
+  observation_snapshots/             # table Delta des observations
+    *.parquet                       # fichiers de données (noms gérés par Delta)
+    _delta_log/                     # transactions de cette table
+  forecast_hourly_snapshots/         # table Delta des prévisions horaires
+    *.parquet
+    _delta_log/
+  _control/                         # suivi technique commun, pas une 3e table BI
+    writer.lock
+    publications/<ingestion_id>.json
+    quarantine/<ingestion_id>.jsonl
+    runtime/coordinator.json
+    runtime/health.json
+```
 
-- **Récent** : six dernières heures, pour alimenter rapidement les nouvelles collectes.
-- **Historique** : de la première archive canonique retenue jusqu'à une borne UTC
-  figée au début de chaque passage, par fenêtres de sept jours. Une fois terminé,
-  ce parcours recommence et recherche à nouveau la première archive. Une arrivée
-  tardive antérieure à l'ancien point de départ reste donc découverte.
+Les deux noms physiques, issus des contrats S1–S3, désignent respectivement les
+**observations** et les **prévisions**. Chaque dossier est une table Delta unique,
+commune à toutes les journées ; le passage au batch ne crée pas un dossier/table
+par jour. Au volume actuel, les tables restent sans partition physique. Les
+colonnes `ingestion_date` et `collected_at_utc` permettent de sélectionner les
+journées. Toutes les versions collectées restent conservées, sans agrégation
+quotidienne ni remplacement par la dernière prévision du jour.
 
-La recherche initiale avance elle aussi par pages, avec un curseur persistant :
-plus de mille répertoires ou anciens objets non canoniques ne bloquent pas le
-bootstrap. Le premier passage effectue le bootstrap automatiquement. Aucun jour de départ
-n'est deviné. `SILVER_START_AT` permet de restreindre explicitement ce périmètre ;
-par défaut, toutes les archives canoniques retenues sont éligibles.
+`_control` contient des verrous, des bilans de publication, les diagnostics de
+rejet et l'avancement des reprises. Les publications ne deviennent complètes
+qu'après les deux commits Delta et la quarantaine. Gold utilise ce journal et
+les versions indiquées pour exclure une ingestion interrompue entre les tables.
+Ne pas effacer `_control` pour relancer un batch. Ne pas lire les Parquet par glob.
+Détails : [stockage et lecture Gold](silver-storage.md).
 
-Une page découverte est ajoutée aux travaux persistants **dans le même
-remplacement atomique que son curseur**, avant toute transformation ou transaction.
-Le curseur ne signifie jamais que les fichiers ont été traités. Un travail est
-retiré seulement après publication complète ou confirmation de cette publication.
-Une panne après publication et avant checkpoint est reprise sans nouveau commit.
+## Une ouverture quotidienne, plusieurs lots si nécessaire
 
-Les erreurs techniques restent en attente sans limite de tentatives : délai de
-30 secondes, puis doublement jusqu'à une heure. Les erreurs ne contiennent que
-leur classe ; aucun message SDK, URL signée ou secret n'est persisté. Une
-contention S3 est un résultat `busy`, pas un rejet métier. Les autres candidats
-continuent et la moitié de la capacité est réservée à chaque parcours. Quand une
-capacité est atteinte, la découverte s'arrête sans avancer son curseur.
+Le timer quotidien envoie un petit message à la file dédiée **`silver-runtime`**.
+`silver_batch_worker` traite au plus 20 ingestions et respecte un budget de
+240 secondes entre unités de travail. S'il reste des fichiers à découvrir,
+traiter ou reprendre, il envoie la continuation avant d'acquitter le message.
+Une journée de 24 collectes ne s'arrête donc pas au vingtième fichier. La suite
+ne dépend ni du timer du lendemain ni d'un traitement météo toutes les cinq
+minutes. Quand le batch est fini, aucune continuation n'est émise.
 
-La limite de temps est vérifiée entre les découvertes et les ingestions. Une
-transaction déjà lancée ne peut pas être annulée proprement ; le timeout Functions
-est de dix minutes et la prochaine invocation reprend les travaux durables.
+Les messages portent une borne de collecte fixe, au format UTC minuit. Un batch
+qui traverse minuit ne commence pas à traiter le jour courant ; une nouvelle
+ouverture quotidienne doit étendre sa borne. Les demandes dupliquées ne
+réinitialisent ni les curseurs ni les publications. Le SDK Queue émet du JSON
+non encodé, compatible avec `host.json` (`messageEncoding=none`). Terraform crée
+la file ; aucun conteneur ou queue métier n'est créé implicitement par le worker.
+
+Le checkpoint lui-même est protégé par un lease Azure renouvelé ; chaque
+remplacement porte ce lease. Les candidats découverts et leur curseur sont
+sauvegardés ensemble **avant** toute écriture Delta. Le lease S3 protège
+séparément les écritures dans les deux tables. Les contrôles restent bornés et
+paginés, y compris la recherche initiale à travers plus de mille anciens objets.
+
+## Historique, jours manqués et arrivées tardives
+
+Deux parcours partagent les lots et disposent chacun de la moitié de la
+capacité des travaux en attente :
+
+- **Quotidien** : J-1, avec relecture de J-2 par défaut pour les arrivées tardives.
+  Après une interruption de plusieurs jours, tous les jours manqués depuis la
+  précédente borne sont couverts, avec leur fenêtre de rattrapage.
+- **Historique** : premier chargement de toutes les archives canoniques retenues
+  avant la borne du batch, par fenêtres de sept jours. Ce bootstrap peut utiliser
+  de nombreuses continuations. Une fois terminé, il reste au repos ; une nouvelle
+  réconciliation devient éligible sept jours plus tard et démarre lors d'un batch
+  quotidien. Elle redécouvre aussi les archives anciennes arrivées tardivement.
+
+`SILVER_START_AT` restreint explicitement le périmètre si nécessaire. Sans ce
+paramètre, aucune date initiale n'est devinée. Le premier chargement n'est pas
+relancé chaque jour. La réconciliation reconnaît les ingestions déjà publiées :
+aucun `MERGE`, doublon ou nouveau commit Delta pour ces ingestions. Les lectures
+Bronze et du journal restent nécessaires pour vérifier leur identité et leur hash.
+
+Une découverte terminée ne signifie pas que le traitement a réussi : la borne
+quotidienne complète et le compteur de passages historiques ne sont validés
+qu'après résolution des travaux correspondants. Les erreurs techniques restent
+en attente sans limite de tentatives métier, avec un délai de 30 secondes doublé
+jusqu'à une heure. La continuation est différée en conséquence, sans boucle vide.
+Une contention de verrou est un résultat `busy`, pas un rejet métier.
+
+Si une invocation s'arrête après publication mais avant checkpoint, la reprise
+reconnaît cette publication sans nouvel écrit Delta. Un échec d'envoi de la suite
+fait échouer le message courant : Azure Queue le retente selon `host.json`, puis
+le place dans `silver-runtime-poison` après cinq échecs d'invocation. Le prochain
+batch quotidien reprend le checkpoint conservé ; les alertes signalent entre-temps
+les erreurs, le retard ou l'absence d'avancement. Corriger la cause avant toute
+reprise manuelle ; ne pas vider la file poison comme procédure de réparation.
 
 ## Configuration
 
 | Paramètre | Défaut | Rôle |
 | --- | --- | --- |
-| `SILVER_ENABLED` | `true` | Interrupteur du traitement et de la sonde |
-| `SILVER_TIMER_SCHEDULE` | `0 */5 * * * *` dans Terraform | Timer de traitement, expression NCRONTAB UTC |
-| `SILVER_HEALTH_SCHEDULE` | `0 */15 * * * *` dans Terraform | Timer indépendant de santé |
+| `SILVER_ENABLED` | `true` | Interrupteur du timer, du worker et de la sonde |
+| `SILVER_TIMER_SCHEDULE` | `0 0 2 * * *` dans Terraform | Ouverture quotidienne à 02 h UTC |
+| `SILVER_BATCH_HOUR_UTC` | `2` | Même heure, utilisée pour valider les bornes et les échéances |
+| `SILVER_QUEUE_NAME` | `silver-runtime` | File dédiée aux continuations, distincte de Bronze |
+| `SILVER_HEALTH_SCHEDULE` | `0 */15 * * * *` | Sonde indépendante toutes les 15 minutes |
 | `SILVER_ROOT` | `silver/weatherapi/schema=v1/transform=1.0.0` | Tables et contrôles de cette version |
-| `SILVER_START_AT` | Première archive retenue | Borne UTC de restriction optionnelle |
+| `SILVER_START_AT` | Première archive retenue | Restriction UTC optionnelle de l'historique |
+| `SILVER_REPLAY_DAYS` | `2` | J-1 et J-2 relus par le parcours quotidien |
+| `SILVER_RECONCILE_DAYS` | `7` | Délai entre réconciliations historiques complètes |
+| `SILVER_COMPLETION_GRACE_MINUTES` | `120` | Batch attendu terminé à 04 h UTC par défaut |
 | `SILVER_BATCH_SIZE` | `20` | Ingestions tentées par invocation, maximum 100 |
-| `SILVER_DISCOVERY_LIMIT` | `40` | Objets inspectés par page de parcours, maximum 100 |
-| `SILVER_DISCOVERY_PAGES` | `48` | Appels de pagination par parcours, maximum 168 |
-| `SILVER_PENDING_LIMIT` | `500` | Travaux persistants, au plus 1 000, moitié par parcours |
-| `SILVER_LOOKBACK_HOURS` | `6` | Fenêtre rapide ; la réconciliation historique reste complète |
+| `SILVER_DISCOVERY_LIMIT` | `40` | Objets inspectés par page, maximum 100 |
+| `SILVER_DISCOVERY_PAGES` | `48` | Appels de pages par parcours, maximum 168 |
+| `SILVER_PENDING_LIMIT` | `500` | Travaux persistants, maximum 1 000 |
 | `SILVER_BUDGET_SECONDS` | `240` | Budget entre unités de travail, maximum 480 |
-| `SILVER_MAX_AGE_MINUTES` | `150` | Fraîcheur des dernières données utilisables |
-| `SILVER_STALLED_MINUTES` | `20` | Âge maximal du signal du coordinateur |
-| `SILVER_PENDING_AGE_MINUTES` | `60` | Seuil d'ancienneté du backlog |
-| `SILVER_EXPECTED_FORECAST_DAYS` | `3` | Couverture attendue de la dernière collecte |
+| `SILVER_MAX_AGE_MINUTES` | `150` | Tolérance entre la dernière collecte utilisable et la fin du jour attendu |
+| `SILVER_STALLED_MINUTES` | `20` | Retard toléré après la prochaine continuation attendue |
+| `SILVER_PENDING_AGE_MINUTES` | `180` | Seuil d'ancienneté des travaux en attente |
+| `SILVER_EXPECTED_FORECAST_DAYS` | `3` | Couverture attendue de la collecte la plus récente |
 
-La variable GitHub `SILVER_ENABLED` alimente aussi Terraform (`silver_enabled`)
-pour conserver l’interrupteur lors des déploiements suivants. Une modification
-manuelle d’un paramètre géré par Terraform peut être rétablie au prochain apply.
+La variable GitHub `SILVER_BATCH_HOUR_UTC` alimente Terraform, qui règle ensemble
+l'expression du timer et l'heure métier ; modifier seulement le cron créerait une
+incohérence. `SILVER_ENABLED` est également conservé par Terraform. Les secrets
+restent dans les réglages existants, jamais dans les messages ou rapports.
 
-Les deux paramètres de calendrier doivent être définis pour indexer les nouveaux
-bindings ; Terraform les fournit. Les SDKs utilisent la connexion de stockage
-existante ou la chaîne de credentials Azure de S3. Les valeurs de connexion ne
-sont jamais passées en arguments CLI ni inscrites dans les rapports.
+Le checkpoint de ce batch est au schéma **2**. Un ancien checkpoint S4 de
+l'orchestrateur toutes les cinq minutes est refusé explicitement. Au moment de
+cette adaptation, la racine Silver définitive n'a pas été initialisée et la PR
+n'est pas fusionnée : aucune migration de données métier n'est requise. Pour un
+checkpoint existant hors tests, prévoir une migration contrôlée avant changement,
+sans suppression ni réinitialisation automatique de l'avancement.
 
-Changer source, racine, version ou borne de départ avec un checkpoint existant
-produit une erreur explicite ; ce changement ne réinitialise pas silencieusement
-les travaux. Pour une nouvelle transformation, créer une nouvelle version/racine.
-Pour un changement de périmètre de la même version, désactiver le timer, examiner
-et sauvegarder l'état, puis définir un plan de migration contrôlé. Ne pas effacer
-le checkpoint comme procédure de reprise ordinaire.
+## Supervision
 
-## Supervision et notifications
+Chaque lot émet `SILVER_RUN` avec sa borne, les publications, les rejeux, le
+nombre de travaux restants, les erreurs, la suite attendue, la durée et le pic RSS.
+`silver_health_monitor` émet `SILVER_HEALTH` et sauvegarde un snapshot horodaté.
+La sonde est en lecture seule vis-à-vis des tables et du coordinateur.
 
-Chaque lot émet `SILVER_RUN`, avec publications, rejeux, erreurs, travaux restants,
-durée et pic RSS du processus Python. Ce pic inclut les autres fonctions du même
-worker ; ce n'est pas une allocation mémoire isolée de Silver.
+La fraîcheur suit désormais **le dernier jour qui devait être livré**, avec une
+grâce de deux heures après l'ouverture quotidienne. Entre deux batchs terminés,
+l'absence d'invocations n'est pas une panne. Une continuation en retard, un jour
+non terminé après son échéance ou l'absence de données utilisables en fin de
+journée sont signalés. Rejouer une vieille archive ne la rend pas récente : la
+date de collecte source est conservée. La qualité suit la collecte la plus récente,
+y compris les rejets et les horizons incomplets ; un ancien rejet historique ne
+remplace pas une collecte récente correcte.
 
-La sonde lit le checkpoint et émet `SILVER_HEALTH`. Elle conserve aussi un snapshot
-diagnostique dans `_control/runtime/health.json`, sans modifier les tables ni le
-coordinateur. Toute lecture de ce snapshot doit contrôler `checked_at` : un ancien
-fichier n'est pas une preuve que la sonde continue à tourner.
+Les cinq règles Monitor surveillent fraîcheur/échéance, erreurs, backlog, qualité
+et absence de sonde depuis 45 minutes. Le filtre `cloud_RoleName` les limite à
+l'application principale. Sans `SILVER_ALERT_ACTION_GROUP_IDS`, les alertes restent
+visibles dans Azure, sans notification externe. Les ZIP de déploiement, le stockage
+`azure-webjobs-*` et les artefacts GitHub de preuve sont distincts des tables métier.
 
-La fraîcheur dépend de `collected_at_utc` des dernières lignes utilisables,
-jamais de la date de rejeu ni du `last_modified` du blob. La qualité suit la plus
-récente collecte : un ancien rejet de Londres dans le bootstrap ne remplace pas
-le statut d'une collecte plus récente correcte. Une réponse partielle, vide,
-rejetée ou avec moins de trois jours est signalée. Les journées DST conservent
-leurs 23 ou 25 heures ; aucune règle de 72 heures glissantes n'est imposée.
+## Mise en service et vérification
 
-Terraform ajoute cinq règles : fraîcheur/coordinateur, erreurs techniques,
-backlog, qualité et absence de sonde depuis 45 minutes. Le filtre `cloud_RoleName`
-limite leurs signaux à la Function App du projet. Les émissions d'un environnement
-de validation ne peuvent pas masquer l'absence de signaux du runtime principal.
+1. Vérifier la création de `silver-runtime`, les **sept fonctions** indexées
+   (quatre Bronze, ouverture quotidienne, worker et sonde Silver), et le timer à 02 h UTC.
+2. Après l'ouverture, suivre `daily.completed_end`, `history.passes >= 1`, `pending`
+   et `next_wake_at` dans `_control/runtime/coordinator.json`. La fin d'énumération
+   seule ne prouve pas la livraison.
+3. Contrôler les publications complètes et les versions des deux tables avant Gold.
+4. Vérifier la fraîcheur de `_control/runtime/health.json` et le raccordement des notifications.
+5. Pour une panne, corriger la cause puis laisser/reprendre la demande via la file
+   dédiée ; conserver tous les checkpoints, rejets et publications.
 
-`SILVER_ALERT_ACTION_GROUP_IDS` (variable GitHub contenant une liste JSON) raccorde
-des groupes d'actions existants. Sans groupe, les alertes restent visibles dans
-Azure ; aucun email n'est promis. `SILVER_MONITORING_ENABLED=false` empêche la
-création des cinq règles, sans désactiver les timers ni leurs traces.
-
-## Vérifier le bootstrap et reprendre
-
-1. Vérifier les six fonctions indexées et les deux nouveaux calendriers.
-2. Lire `coordinator.json` et vérifier `history.passes >= 1`, absence d'erreurs
-   récurrentes et drainage de `pending`. Le producteur peut continuer à collecter.
-3. Figer une liste des identités Bronze du périmètre et la rapprocher des
-   publications complètes. Une collecte `failed` donne une publication `empty` ;
-   un JSON inexploitable peut donner `rejected`. Une publication ne signifie donc
-   pas nécessairement qu'il existe des lignes métier pour cette ingestion.
-4. Utiliser le plan de lecture `published_read_plan` : versions Delta figées et
-   filtre sur les identités publiées. Rapprocher les lignes et les rejets ; ne pas
-   lire les Parquet par glob et ne pas attendre une transaction commune aux tables.
-5. Vérifier deux collectes d'heures successives et un rejeu sans changement de
-   versions ni doublons. Les révisions de prévision restent distinctes par collecte.
-
-En cas d'erreur technique, corriger l'accès ou la cause, puis laisser le prochain
-timer reprendre. Les ingestions en attente conservent leur chemin, nombre de
-tentatives et prochaine échéance. Un redémarrage de la Function App ne perd pas
-ces travaux. Le CLI `scripts/silver_backfill.py` reste disponible, en preview par
-défaut, pour un périmètre explicite ; le lease S3 arbitre sa concurrence avec le
-timer. Ne jamais vider Bronze, la quarantaine ou les tables pour débloquer un lot.
-
-## Dépendances et validation avant fusion
-
-Python 3.11 Linux, Flex Consumption 2 Gio. Les pins `deltalake==1.2.1` et
-`pyarrow==21.0.0` ont une seule définition dans `functions/requirements-silver.txt`.
-Le fichier root de développement et le paquet Functions la référencent ; le zip
-contient ainsi toutes les définitions nécessaires au build distant.
-
-Le workflow **Validate S4 on isolated Azure Functions** est lançable manuellement.
-Il crée une Function App et un plan Flex temporaires ; les fonctions Bronze y
-sont désactivées. Il inventorie une fenêtre récente du vrai Bronze par pages bornées (au plus
-20 000 objets), sans parcourir tous les anciens objets pour préparer le test,
-puis valide le bootstrap
-de toutes les archives d’une fenêtre déclarée de 48 heures maximum, jusqu’à
-environ 80 ingestions, vers une racine isolée. La taille et la borne de ce
-périmètre sont inscrites dans le rapport ; il ne prétend pas charger tout le
-Bronze métier avant fusion. Le parcours historique sans borne de départ est
-aussi testé sur le conteneur isolé et par les régressions multi-semaines. Il
-puis copie sans modification deux archives réelles d'heures consécutives dans un
-conteneur temporaire pour tester l'arrivée progressive des fichiers.
-
-L'essai provoque un arrêt entre les commits, conserve son checkpoint, laisse le
-vrai timer terminer, bloque le verrou S3, vérifie l'attente puis la reprise et un
-rejeu automatique sans doublon. La sonde doit produire son snapshot. Les cinq
-requêtes Monitor sont aussi acceptées par l'API Azure sous forme de règles
-temporaires désactivées. L'app, son plan, ces règles, les conteneurs et les préfixes
-possédés sont supprimés, avec une étape de nettoyage de secours indépendante.
-Les métadonnées internes de l'hôte Functions dans son stockage partagé restent
-gérées par la plateforme ; elles n'alimentent aucune table métier.
-
-Le rapport `silver-s4-report.json` et le manifeste non secret des ressources sont
-conservés dans l'artefact `silver-s4-runtime-evidence`. La branche principale et sa
-Function App ne sont ni déployées ni modifiées par cet essai. La PR reste ouverte
-jusqu'à sa fusion explicitement demandée.
-
-## Résultats d'acceptation
-
-La suite comprend **384 tests** sur Python 3.11, avec des transactions Delta
-locales réelles et des scénarios de crash/reprise. Le plan Terraform valide les
-paramètres et les cinq nouvelles règles sans appliquer de changement au runtime
-principal.
-
-Le [premier essai Azure accepté](https://github.com/mLR5/dataeng-portfolio/actions/runs/39342792976)
-a traité **52 archives réelles** d'un périmètre déclaré de 48 heures :
-**117 observations et 8 424 prévisions**, aucune clé dupliquée. Le pic RSS Python
-était de **281,6 Mio** sur l'instance de 2 Gio. Le stockage retenait alors 6 579
-ingestions canoniques ; ce test n'en prétend pas avoir chargé l'intégralité.
-
-L'arrêt après le premier commit puis la reprise par le timer, la contention,
-les deux heures consécutives (6 observations et 432 prévisions), le rejeu sans
-changement de versions, la sonde indépendante et les cinq définitions Monitor ont
-été vérifiés. Les ressources temporaires ont été supprimées.
-
-La [campagne autonome de référence](https://github.com/mLR5/dataeng-portfolio/actions/runs/39343676498)
-utilise la configuration complète du helper, y compris les bindings des fonctions
-Bronze désactivées. Consulter son rapport et son champ `cleanup.result` pour la
-preuve du contrôle et du nettoyage. Les fichiers sous `functions/` de cette
-campagne sont identiques à ceux de la PR livrée ; les ajouts de configuration et
-de documentation n'en modifient pas le paquet.
+Le helper `scripts/validate_silver_runtime_azure.py` utilise une app, un plan, des
+files et des racines ADLS temporaires possédés. Le timer y est accéléré et l'heure
+de batch y vaut 00 h, uniquement pour tester sans attendre une journée ; il ne
+modifie pas le calendrier de production. Il contrôle les continuations réelles,
+les jours fermés, une interruption entre tables, deux batchs consécutifs de part
+et d'autre de minuit, la contention, le rejeu et les cinq règles Monitor. Il
+nettoie ses ressources dans un `finally` et dans une étape de secours du workflow.
+Ces essais n'initialisent pas les tables définitives et ne déploient pas `main`.

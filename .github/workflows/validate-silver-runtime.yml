@@ -1,8 +1,8 @@
-name: Validate S4 on isolated Azure Functions
+name: Validate daily Silver on isolated Azure Functions
 on:
   workflow_dispatch:
   push:
-    branches: [validation/silver-s4]
+    branches: [validation/silver-s4, validation/silver-daily]
     paths:
       - 'functions/**'
       - 'scripts/validate_silver_runtime_azure.py'
@@ -34,7 +34,7 @@ jobs:
       - uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - name: Bootstrap, resume and replay on isolated Flex Consumption
+      - name: Validate daily batches and queue continuations on isolated Flex Consumption
         run: python scripts/validate_silver_runtime_azure.py
       - name: Retry cleanup even if validation failed
         if: always()
@@ -42,7 +42,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: silver-s4-runtime-evidence
+          name: silver-daily-batch-evidence
           path: |
             silver-s4-report.json
             silver-s4-resources.json

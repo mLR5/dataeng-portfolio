@@ -81,3 +81,13 @@ variable "silver_alert_action_group_ids" {
   type        = list(string)
   default     = []
 }
+
+variable "silver_batch_hour_utc" {
+  description = "UTC start hour of the daily J+1 batch; prior UTC collection days only."
+  type        = number
+  default     = 2
+  validation {
+    condition     = var.silver_batch_hour_utc >= 0 && var.silver_batch_hour_utc <= 23 && floor(var.silver_batch_hour_utc) == var.silver_batch_hour_utc
+    error_message = "silver_batch_hour_utc must be an integer between 0 and 23."
+  }
+}

@@ -6,7 +6,7 @@ Les 64 tests S3 exécutés localement utilisent de **vraies transactions Delta**
 y compris sept scénarios avec le transformateur S2 réel (dont les deux fixtures
 dérivées de Bronze S1) ; l’authentification,
 les leases et collisions sur ADLS sont aussi vérifiés dans l’acceptation Azure.
-Le timer, son checkpoint et la supervision sont décrits dans [S4](silver-runtime.md).
+Le batch quotidien J+1, ses continuations, son checkpoint et la supervision sont décrits dans [S4](silver-runtime.md).
 
 ## Deux tables communes aux ingestions
 
@@ -18,6 +18,15 @@ datalake/silver/weatherapi/schema=v1/transform=1.0.0/
   _control/publications/<ingestion_id>.json
   _control/quarantine/<ingestion_id>.jsonl
 ```
+
+Les deux dossiers métier correspondent aux **observations** et aux **prévisions**.
+Ils sont stockés dans le conteneur `datalake` du compte ADLS Gen2 existant.
+`_control` est un dossier technique, pas une troisième table analytique : il
+conserve les verrous, bilans de publication, diagnostics de rejet et checkpoints
+utilisés pour terminer les batchs et éviter les doublons. Chaque table contient
+ses fichiers Parquet et son propre `_delta_log`. Le traitement quotidien ajoute
+les nouvelles collectes à ces mêmes tables ; il ne remplace pas les snapshots
+et ne crée pas une table par jour. La date de collecte reste une colonne métier.
 
 Chaque racine métier est une table Delta unique, initialement sans partition
 physique. Les schémas sont explicites, même pour une première ingestion vide.

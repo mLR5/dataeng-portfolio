@@ -1,10 +1,12 @@
-"""Automatic bounded Silver batch; failures remain durable for the next tick."""
+"""Open one daily J+1 batch; its queue continues bounded work to completion."""
 import json
 import logging
+from datetime import datetime, timezone
 
 import azure.functions as func
 
-from shared.silver_runtime import make_runtime, run_tick
+from shared.silver_queue import enqueue_wakeup
+from shared.silver_runtime import batch_cutoff
 from shared.silver_settings import SilverSettings
 
 logger = logging.getLogger(__name__)
@@ -16,12 +18,9 @@ def main(timer: func.TimerRequest) -> None:
         if not settings.enabled:
             logger.info('SILVER_RUN %s', json.dumps({'outcome': 'disabled'}))
             return
-        runner, store, _ = make_runtime(settings)
-        report = run_tick(runner, store, settings)
+        cutoff = batch_cutoff(datetime.now(timezone.utc), settings)
+        enqueue_wakeup(settings, cutoff)
+        logger.info('SILVER_RUN %s', json.dumps({'outcome': 'scheduled', 'cutoff_utc': cutoff.isoformat()}))
     except Exception as error:
         logger.error('SILVER_RUN %s', json.dumps({'outcome': 'error', 'error_type': type(error).__name__}))
-        raise RuntimeError('Silver batch failed; see SILVER_RUN event') from None
-    log = logger.warning if report['outcome'] == 'partial' else logger.info
-    log('SILVER_RUN %s', json.dumps(report))
-    if report['outcome'] == 'partial':
-        raise RuntimeError('Silver has retryable failures; see SILVER_RUN event')
+        raise RuntimeError('Silver daily scheduling failed; see SILVER_RUN event') from None

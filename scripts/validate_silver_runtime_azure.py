@@ -3,7 +3,8 @@
 
 Creates an owned temporary app/plan, two storage prefixes and disabled log rules.
 Copies two genuine consecutive-hour archives unchanged to a temporary container.
-The deployed timer is never invoked manually. Every resource is removed finally.
+The accelerated timer opens a daily batch; real queue triggers continue it.
+The production schedule remains daily at 02:00 UTC. All owned resources are removed.
 """
 from datetime import datetime, timedelta, timezone
 import json
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'functions'))
 
 from azure.core.exceptions import ResourceNotFoundError
 from azure.storage.blob import BlobServiceClient
+from azure.storage.queue import QueueServiceClient
 from deltalake import DeltaTable
 
 from shared import config
@@ -32,8 +34,9 @@ from shared.silver_discovery import discover_bronze
 from shared.silver_lease import BlobWriterLease
 from shared.silver_publication import json_bytes, published_read_plan, publication_name
 from shared.silver_runner import bronze_identity
-from shared.silver_runtime import STATE_NAME, _source_time, earliest_bronze, make_runtime, run_tick
+from shared.silver_runtime import STATE_NAME, _source_time, batch_cutoff, earliest_bronze, make_runtime, run_tick
 from shared.silver_settings import SilverSettings
+from shared.silver_queue import wakeup_body
 from shared.silver_transform import transform_bronze
 
 BASE = Path(__file__).resolve().parents[1]
@@ -43,7 +46,7 @@ NONCE = os.environ.get('GITHUB_RUN_ID', '') + '-' + os.environ.get('GITHUB_RUN_A
 if not re.fullmatch(r'\d+-\d+', NONCE):
     raise ValidationError('Run this validation from its GitHub workflow')
 REPORT = {'result': 'failed', 'commit': os.environ.get('GITHUB_SHA'), 'checks': [], 'cleanup': {}}
-OWNED = {'owner': NONCE, 'resource_ids': [], 'containers': [], 'root': f'silver/validation-s4/{NONCE}'}
+OWNED = {'owner': NONCE, 'resource_ids': [], 'containers': [], 'queues': [], 'root': f'silver/validation-s4/{NONCE}'}
 SERVICE = None
 
 
@@ -176,7 +179,9 @@ def validate():
     REPORT['stage'] = 'inventory_source'
     persist()
     now = datetime.now(timezone.utc)
-    retained = source_snapshot(originals, now - timedelta(hours=48), now)
+    # Test-only hour 0 keeps a stable closed-day horizon through the Azure build.
+    batch_end = batch_cutoff(now, SilverSettings(batch_hour_utc=0))
+    retained = source_snapshot(originals, batch_end - timedelta(hours=48), batch_end)
     check('recent_retained_bronze_window_nonempty', bool(retained))
     cursor = None
     for page_number in range(8):
@@ -198,13 +203,13 @@ def validate():
     snapshot = [name for name in retained if _source_time(name) >= cutoff]
     REPORT['source_scope'] = {'ingestions_in_48h_window': len(retained),
                               'validation_from': cutoff.isoformat(), 'selected_ingestions': len(snapshot),
-                              'inventory_to': now.isoformat(), 'maximum_window_hours': 48}
+                              'inventory_to': batch_end.isoformat(), 'maximum_window_hours': 48}
     check('retained_bronze_snapshot_nonempty', bool(snapshot), {'ingestions': len(snapshot)})
     by_hour = {}
     for name in snapshot:
         by_hour[_source_time(name).replace(minute=0, second=0)] = name
     pair = next(((by_hour[hour - timedelta(hours=1)], by_hour[hour]) for hour in sorted(by_hour, reverse=True)
-                 if hour - timedelta(hours=1) in by_hour), None)
+                 if hour.hour == 0 and hour - timedelta(hours=1) in by_hour), None)
     check('two_genuine_consecutive_hour_archives', pair is not None)
     REPORT['consecutive_sources'] = pair
     marker = SERVICE.get_blob_client('datalake', OWNED['root'] + '/owner.json')
@@ -214,6 +219,12 @@ def validate():
         SERVICE.create_container(name)
         OWNED['containers'].append(name)
         persist()
+    queue_service = QueueServiceClient.from_connection_string(connection)
+    queue_a, queue_b = f'vs4-work-a-{NONCE}', f'vs4-work-b-{NONCE}'
+    for name in (queue_a, queue_b):
+        OWNED['queues'].append(name)
+        persist()
+        queue_service.create_queue(name)
     tags = {'purpose': 'silver-s4-validation', 'validation_id': NONCE}
     OWNED['resource_ids'].append(plan_id)
     persist()
@@ -229,8 +240,8 @@ def validate():
         'QUEUE_NAME': f'vs4-unused-{NONCE}', 'STAGING_CONTAINER': source_container,
         'BRONZE_CONTAINER': 'bronze', 'DATALAKE_CONTAINER': 'datalake',
         'SILVER_ENABLED': 'true', 'SILVER_ROOT': root_a, 'SILVER_TIMER_SCHEDULE': '0 * * * * *',
-        'SILVER_START_AT': cutoff.isoformat(),
-        'SILVER_HEALTH_SCHEDULE': '0 * * * * *', 'SILVER_BATCH_SIZE': '100',
+        'SILVER_START_AT': cutoff.isoformat(), 'SILVER_QUEUE_NAME': queue_a, 'SILVER_BATCH_HOUR_UTC': '0',
+        'SILVER_HEALTH_SCHEDULE': '0 * * * * *', 'SILVER_BATCH_SIZE': '5',
         'SILVER_DISCOVERY_LIMIT': '100', 'SILVER_DISCOVERY_PAGES': '168', 'SILVER_BUDGET_SECONDS': '480',
         **{f'AzureWebJobs.{name}.Disabled': 'true' for name in before},
     }
@@ -270,9 +281,9 @@ def validate():
         result = production_functions(app, rg)
         REPORT['isolated_indexed_functions'] = result
         persist()
-        return result if len(result) == 6 else None
-    names = wait_for('six_functions_indexed_with_delta_dependencies', indexed_functions, seconds=180)
-    check('silver_functions_indexed', {'weather_silver_processor', 'silver_health_monitor'} <= set(names))
+        return result if len(result) == 7 else None
+    names = wait_for('seven_functions_indexed_with_delta_dependencies', indexed_functions, seconds=180)
+    check('silver_functions_indexed', {'weather_silver_processor', 'silver_batch_worker', 'silver_health_monitor'} <= set(names))
     settings = SilverSettings.from_env({**values, 'SILVER_ROOT': root_a})
     config.BRONZE_CONTAINER = 'bronze'
     runner_a, store_a, _ = make_runtime(settings)
@@ -289,19 +300,22 @@ def validate():
     persist()
     state_a, published_a = wait_for('automatic_bootstrap_covers_all_retained_archives', bootstrapped, seconds=600)
     REPORT['bootstrap'] = {'source_snapshot': len(snapshot), 'publications': len(published_a),
-                           'rows': verify_gold(runner_a, published_a), 'last_run': state_a['last_run']}
+                           'rows': verify_gold(runner_a, published_a), 'last_run': state_a['last_run'], 'worker_invocations': state_a['invocations']}
+    check('queue_continuations_finish_more_than_one_lot', state_a['invocations'] > 1 and state_a['next_wake_at'] is None)
+    check('only_closed_collection_days_published', all(_source_time(pub['source_blob']) < batch_end for pub in published_a))
+    check('daily_completion_recorded', state_a['daily']['completed_end'] == batch_end.isoformat())
     check('runtime_memory_within_2gb', state_a['last_run']['peak_rss_mb'] < 2048,
           {'peak_rss_mb': state_a['last_run']['peak_rss_mb']})
 
     # Phase B: new isolated source/root. Fail after the first genuine Delta commit.
     app_settings(app, rg, {'BRONZE_CONTAINER': source_container, 'SILVER_ROOT': root_b,
                           'SILVER_START_AT': '', 'SILVER_ENABLED': 'false',
-                          'AzureWebJobs.weather_silver_processor.Disabled': 'true'})
+                          'AzureWebJobs.weather_silver_processor.Disabled': 'true', 'SILVER_QUEUE_NAME': queue_b})
     isolated_source = SERVICE.get_container_client(source_container)
     raws = {name: originals.get_blob_client(name).download_blob().readall() for name in pair}
     isolated_source.get_blob_client(pair[0]).upload_blob(raws[pair[0]], overwrite=False)
     config.BRONZE_CONTAINER = source_container
-    settings_b = SilverSettings.from_env({**values, 'SILVER_ROOT': root_b, 'SILVER_START_AT': ''})
+    settings_b = SilverSettings.from_env({**values, 'SILVER_ROOT': root_b, 'SILVER_START_AT': '', 'SILVER_QUEUE_NAME': queue_b})
     runner_b, store_b, _ = make_runtime(settings_b)
     real_writer = runner_b.writer
     class InjectedInterruption(RuntimeError):
@@ -313,29 +327,42 @@ def validate():
                 raise InjectedInterruption()
             return real_writer.merge(name, rows, lease, **kwargs)
     runner_b.writer = FailSecondTable()
-    seeded = run_tick(runner_b, store_b, settings_b)
+    first_end = _source_time(pair[1]).replace(hour=0, minute=0, second=0, microsecond=0)
+    second_end = first_end + timedelta(days=1)
+    seeded = run_tick(runner_b, store_b, settings_b, cutoff=first_end)
     runner_b.writer = real_writer
     check('interrupted_ingestion_is_durable_and_unpublished',
           seeded['technical_errors'] == 1 and pair[0] in store_b.read()['pending']
           and runner_b.controls.read(publication_name(bronze_identity(pair[0]))) is None)
-    app_settings(app, rg, {'SILVER_ENABLED': 'true', 'AzureWebJobs.weather_silver_processor.Disabled': 'false'})
-    first = wait_for('deployed_timer_resumes_between_table_commits',
+    # The daily opener stays disabled: only deployed queue continuations can resume.
+    app_settings(app, rg, {'SILVER_ENABLED': 'true'})
+    queue_service.get_queue_client(queue_b).send_message(wakeup_body(first_end))
+    first = wait_for('deployed_queue_resumes_between_table_commits',
                      lambda: runner_b.controls.read(publication_name(bronze_identity(pair[0]))), seconds=300)
     first = json.loads(first)
     check('publication_matches_exact_genuine_source', first['source_sha256'] == transform_bronze(raws[pair[0]], pair[0]).source_sha256)
     with BlobWriterLease(runner_b.controls.blob('writer.lock')):
         isolated_source.get_blob_client(pair[1]).upload_blob(raws[pair[1]], overwrite=False)
+        queue_service.get_queue_client(queue_b).send_message(wakeup_body(second_end))
         def busy_pending():
             state = store_b.read()
             return state if state and pair[1] in state['pending'] and (state.get('last_run') or {}).get('busy', 0) else None
-        wait_for('deployed_timer_retains_busy_writer_as_pending', busy_pending, seconds=240)
-    wait_for('deployed_timer_processes_second_consecutive_hour',
+        wait_for('deployed_queue_retains_busy_writer_as_pending', busy_pending, seconds=240)
+    wait_for('next_daily_batch_processes_second_consecutive_hour',
              lambda: runner_b.controls.read(publication_name(bronze_identity(pair[1]))), seconds=300)
     complete = publications(runner_b)
     check('both_consecutive_ingestions_published', {pub['ingestion_id'] for pub in complete} == {bronze_identity(name) for name in pair})
     REPORT['consecutive_rows'] = verify_gold(runner_b, complete)
+    wait_for('second_daily_batch_finished', lambda: (lambda state: state if state and not state['pending'] and state['next_wake_at'] is None else None)(store_b.read()), seconds=180)
     versions = table_versions(runner_b)
+    # Make the weekly reconciliation due in this owned test checkpoint. Its
+    # execution still runs exclusively through the deployed queue trigger.
+    with store_b.session() as session:
+        state = session.read()
+        state['history']['next_reconcile_at'] = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        session.save(state)
     last_started = store_b.read()['last_started_at']
+    queue_service.get_queue_client(queue_b).send_message(wakeup_body(second_end))
     def replayed():
         state = store_b.read()
         return state if (state and state.get('last_finished_at') and state['last_started_at'] > last_started
@@ -442,6 +469,21 @@ def cleanup():
                 pass
         except Exception as error:
             failures.append({'kind': 'prefix', 'type': type(error).__name__})
+    queue_service = QueueServiceClient.from_connection_string(az(['storage', 'account', 'show-connection-string',
+        '--name', os.environ['AZURE_STORAGE_ACCOUNT'], '--resource-group', f"rg-{os.environ['PROJECT_NAME']}-{os.environ['ENVIRONMENT']}", '--query', 'connectionString']))
+    for name in OWNED.get('queues', []):
+        try:
+            if name not in (f'vs4-work-a-{NONCE}', f'vs4-work-b-{NONCE}'):
+                raise ValidationError('Cleanup queue is not owned')
+            queue_service.delete_queue(name)
+            try:
+                queue_service.delete_queue(name + '-poison')
+            except ResourceNotFoundError:
+                pass
+        except ResourceNotFoundError:
+            pass
+        except Exception as error:
+            failures.append({'kind': 'queue', 'type': type(error).__name__})
     REPORT['cleanup'] = {'result': 'success' if not failures else 'failed', 'errors': failures}
     persist()
     if failures:
