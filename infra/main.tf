@@ -83,6 +83,13 @@ module "function_app" {
   weatherapi_secret_uri = "${module.keyvault.vault_uri}secrets/weather-api-key"
   queue_name            = module.storage.queue_name
   datalake_container    = "datalake"
+  additional_app_settings = {
+    SILVER_ENABLED         = tostring(var.silver_enabled)
+    SILVER_TIMER_SCHEDULE  = "0 0 ${var.silver_batch_hour_utc} * * *"
+    SILVER_HEALTH_SCHEDULE = "0 */15 * * * *"
+    SILVER_BATCH_HOUR_UTC  = tostring(var.silver_batch_hour_utc)
+    SILVER_QUEUE_NAME      = azurerm_storage_queue.silver_runtime.name
+  }
 
   tags = var.tags
 
@@ -108,4 +115,10 @@ resource "azurerm_role_assignment" "function_app_storage_queue_contributor" {
   scope                = module.storage.id
   role_definition_name = "Storage Queue Data Contributor"
   principal_id         = module.function_app.principal_id
+}
+
+# Internal wake-ups continue a single daily batch across bounded invocations.
+resource "azurerm_storage_queue" "silver_runtime" {
+  name               = "silver-runtime"
+  storage_account_id = module.storage.id
 }

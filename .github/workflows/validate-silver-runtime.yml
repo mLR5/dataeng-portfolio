@@ -1,0 +1,50 @@
+name: Validate daily Silver on isolated Azure Functions
+on:
+  workflow_dispatch:
+  push:
+    branches: [validation/silver-s4, validation/silver-daily]
+    paths:
+      - 'functions/**'
+      - 'scripts/validate_silver_runtime_azure.py'
+      - '.github/workflows/validate-silver-runtime.yml'
+permissions:
+  contents: read
+concurrency:
+  group: validate-silver-runtime-dev
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    environment: dev
+    env:
+      PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
+      ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+      AZURE_STORAGE_ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+      AZURE_LOCATION: ${{ secrets.TF_VAR_LOCATION }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install the exact deployed dependencies
+        run: python -m pip install -r functions/requirements.txt
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Validate daily batches and queue continuations on isolated Flex Consumption
+        run: python scripts/validate_silver_runtime_azure.py
+      - name: Retry cleanup even if validation failed
+        if: always()
+        run: python scripts/validate_silver_runtime_azure.py --cleanup
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: silver-daily-batch-evidence
+          path: |
+            silver-s4-report.json
+            silver-s4-resources.json
+          if-no-files-found: warn
+          retention-days: 30

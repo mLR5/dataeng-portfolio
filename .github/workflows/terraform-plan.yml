@@ -52,3 +52,7 @@ jobs:
         TF_VAR_storage_account_name: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
         TF_VAR_bronze_monitoring_enabled: ${{ vars.BRONZE_MONITORING_ENABLED || 'true' }}
         TF_VAR_bronze_alert_action_group_ids: ${{ vars.BRONZE_ALERT_ACTION_GROUP_IDS || '[]' }}
+        TF_VAR_silver_monitoring_enabled: ${{ vars.SILVER_MONITORING_ENABLED || 'true' }}
+        TF_VAR_silver_enabled: ${{ vars.SILVER_ENABLED || 'true' }}
+        TF_VAR_silver_batch_hour_utc: ${{ vars.SILVER_BATCH_HOUR_UTC || '2' }}
+        TF_VAR_silver_alert_action_group_ids: ${{ vars.SILVER_ALERT_ACTION_GROUP_IDS || '[]' }}

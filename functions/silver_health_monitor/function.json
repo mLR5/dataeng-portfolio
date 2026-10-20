@@ -1,0 +1,7 @@
+{
+  "scriptFile": "__init__.py",
+  "bindings": [{
+    "name": "timer", "type": "timerTrigger", "direction": "in",
+    "schedule": "%SILVER_HEALTH_SCHEDULE%", "runOnStartup": false, "useMonitor": true
+  }]
+}

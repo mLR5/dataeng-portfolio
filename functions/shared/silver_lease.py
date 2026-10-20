@@ -79,3 +79,12 @@ class BlobWriterLease(AbstractContextManager):
                     # a success, nor replace the original failure.
                     self._lost.set()
         return False
+
+    def replace_blob(self, content):
+        """Replace the leased blob itself with server-enforced lease ownership.
+
+        Used for the coordinator checkpoint. A stale coordinator cannot replace
+        state after its lease expires, even if its upload was already in flight.
+        """
+        self.assert_held()
+        self.blob.upload_blob(content, overwrite=True, lease=self._lease)

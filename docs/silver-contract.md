@@ -13,8 +13,8 @@ accompagnées d'une provenance réelle constituent des observations du fournisse
 - Python cible : **3.11 Linux**, identique à Azure Functions. Les tests locaux
   S1 ont tourné sous Python **3.12.14** ; la CI dédiée exécute Python 3.11.
 - Dépendances isolées dans `requirements-silver.txt` : **deltalake 1.2.1**
-  (delta-rs) et **PyArrow 21.0.0**. Le paquet Functions Bronze n'est pas modifié
-  par S1 ; son adoption et sa validation au déploiement relèvent de S4.
+  (delta-rs) et **PyArrow 21.0.0**. S4 intègre ces mêmes pins au paquet Functions
+  via `functions/requirements-silver.txt` ; voir [runtime et exploitation](silver-runtime.md).
 - `transform_bronze(raw: bytes, source_blob: str) -> TransformResult` est
   implémenté par S2 dans `shared.silver_transform` sans I/O.
 - S3 consomme `result.tables`, `TABLE_SCHEMAS`, `TABLE_KEYS`, `result.rejections`

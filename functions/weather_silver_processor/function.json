@@ -1,0 +1,18 @@
+{
+  "scriptFile": "__init__.py",
+  "bindings": [
+    {
+      "name": "timer",
+      "type": "timerTrigger",
+      "direction": "in",
+      "schedule": "%SILVER_TIMER_SCHEDULE%",
+      "runOnStartup": false,
+      "useMonitor": true
+    }
+  ],
+  "retry": {
+    "strategy": "fixedDelay",
+    "maxRetryCount": 5,
+    "delayInterval": "00:01:00"
+  }
+}

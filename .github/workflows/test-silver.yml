@@ -24,6 +24,7 @@ jobs:
             requirements-dev.txt
             requirements-silver.txt
             functions/requirements.txt
+            functions/requirements-silver.txt
       - name: Install Bronze and Silver dependencies
         run: python -m pip install -r requirements-dev.txt -r requirements-silver.txt
       - name: Validate dependency compatibility

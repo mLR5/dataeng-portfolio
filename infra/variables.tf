@@ -63,3 +63,31 @@ variable "bronze_alert_action_group_ids" {
   type        = list(string)
   default     = []
 }
+
+variable "silver_monitoring_enabled" {
+  description = "Create five Silver log alerts; the independent health timer remains active."
+  type        = bool
+  default     = true
+}
+
+variable "silver_enabled" {
+  description = "Enable automatic Silver batches; false keeps Bronze active and emits disabled health signals."
+  type        = bool
+  default     = true
+}
+
+variable "silver_alert_action_group_ids" {
+  description = "Existing action groups for Silver. Empty: Azure alerts without external notifications."
+  type        = list(string)
+  default     = []
+}
+
+variable "silver_batch_hour_utc" {
+  description = "UTC start hour of the daily J+1 batch; prior UTC collection days only."
+  type        = number
+  default     = 2
+  validation {
+    condition     = var.silver_batch_hour_utc >= 0 && var.silver_batch_hour_utc <= 23 && floor(var.silver_batch_hour_utc) == var.silver_batch_hour_utc
+    error_message = "silver_batch_hour_utc must be an integer between 0 and 23."
+  }
+}
