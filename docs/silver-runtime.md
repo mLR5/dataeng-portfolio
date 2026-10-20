@@ -163,3 +163,28 @@ Le rapport `silver-s4-report.json` et le manifeste non secret des ressources son
 conservés dans l'artefact `silver-s4-runtime-evidence`. La branche principale et sa
 Function App ne sont ni déployées ni modifiées par cet essai. La PR reste ouverte
 jusqu'à sa fusion explicitement demandée.
+
+## Résultats d'acceptation
+
+La suite comprend **384 tests** sur Python 3.11, avec des transactions Delta
+locales réelles et des scénarios de crash/reprise. Le plan Terraform valide les
+paramètres et les cinq nouvelles règles sans appliquer de changement au runtime
+principal.
+
+Le [premier essai Azure accepté](https://github.com/mLR5/dataeng-portfolio/actions/runs/39342792976)
+a traité **52 archives réelles** d'un périmètre déclaré de 48 heures :
+**117 observations et 8 424 prévisions**, aucune clé dupliquée. Le pic RSS Python
+était de **281,6 Mio** sur l'instance de 2 Gio. Le stockage retenait alors 6 579
+ingestions canoniques ; ce test n'en prétend pas avoir chargé l'intégralité.
+
+L'arrêt après le premier commit puis la reprise par le timer, la contention,
+les deux heures consécutives (6 observations et 432 prévisions), le rejeu sans
+changement de versions, la sonde indépendante et les cinq définitions Monitor ont
+été vérifiés. Les ressources temporaires ont été supprimées.
+
+La [campagne autonome de référence](https://github.com/mLR5/dataeng-portfolio/actions/runs/39343676498)
+utilise la configuration complète du helper, y compris les bindings des fonctions
+Bronze désactivées. Consulter son rapport et son champ `cleanup.result` pour la
+preuve du contrôle et du nettoyage. Les fichiers sous `functions/` de cette
+campagne sont identiques à ceux de la PR livrée ; les ajouts de configuration et
+de documentation n'en modifient pas le paquet.

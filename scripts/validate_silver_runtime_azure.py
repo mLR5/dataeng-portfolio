@@ -198,7 +198,7 @@ def validate():
     snapshot = [name for name in retained if _source_time(name) >= cutoff]
     REPORT['source_scope'] = {'ingestions_in_48h_window': len(retained),
                               'validation_from': cutoff.isoformat(), 'selected_ingestions': len(snapshot),
-                              'maximum_window_hours': 48}
+                              'inventory_to': now.isoformat(), 'maximum_window_hours': 48}
     check('retained_bronze_snapshot_nonempty', bool(snapshot), {'ingestions': len(snapshot)})
     by_hour = {}
     for name in snapshot:
@@ -279,7 +279,9 @@ def validate():
     expected_ids = {bronze_identity(name) for name in snapshot}
     def bootstrapped():
         state = store_a.read()
-        if not state or state['history']['passes'] < 1 or state['pending']:
+        if (not state or state['history']['passes'] < 1 or state['pending']
+                or not state.get('last_run') or not state.get('last_finished_at')
+                or parse_timestamp(state['last_finished_at']) < parse_timestamp(state['last_started_at'])):
             return None
         published = publications(runner_a)
         return (state, published) if expected_ids <= {pub['ingestion_id'] for pub in published} else None
