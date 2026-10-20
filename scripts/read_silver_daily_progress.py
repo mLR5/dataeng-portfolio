@@ -2,7 +2,7 @@ import json,os,subprocess
 from azure.storage.blob import BlobServiceClient
 from azure.storage.queue import QueueServiceClient
 from azure.core.exceptions import ResourceNotFoundError
-nonce='39355949893-1'
+nonce='39480613998-1'
 rg=f"rg-{os.environ['PROJECT_NAME']}-{os.environ['ENVIRONMENT']}"
 def az(args):
  r=subprocess.run(['az',*args,'--output','json','--only-show-errors'],capture_output=True,text=True)
