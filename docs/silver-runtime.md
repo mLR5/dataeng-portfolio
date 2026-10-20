@@ -180,3 +180,20 @@ les jours fermés, une interruption entre tables, deux batchs consécutifs de pa
 et d'autre de minuit, la contention, le rejeu et les cinq règles Monitor. Il
 nettoie ses ressources dans un `finally` et dans une étape de secours du workflow.
 Ces essais n'initialisent pas les tables définitives et ne déploient pas `main`.
+
+
+Le workflow d’acceptation peut définir `SILVER_VALIDATION_MODE=recovery_only` pour
+relancer seulement les scénarios de récupération dans une application neuve :
+source et racine définitives du test dès le déploiement, ouverture périodique
+inactive, deux archives réelles de part et d’autre de minuit. Ce mode vérifie les
+commits interrompus, les bornes quotidiennes, la contention et sa reprise, le
+rejeu, Gold et la supervision. Le contrôle de contention lit le diagnostic
+persistant du travail en attente ; le compteur d’un seul passage ne suffit pas.
+Une archive copiée après clôture de sa fenêtre demande une réconciliation éligible,
+sans réinitialiser artificiellement une demande quotidienne dupliquée.
+
+Le mode ciblé complète une preuve de bootstrap obtenue séparément avec le même
+code Functions ; il ne prouve pas à lui seul l’ouverture par timer, le chargement
+de la fenêtre historique ni sa mémoire maximale. Sans cette variable, le helper
+exécute les deux phases. Les preuves doivent indiquer leurs périmètres et les
+statuts réels des exécutions, y compris un run interrompu sur un contrôle ultérieur.
