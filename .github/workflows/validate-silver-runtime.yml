@@ -1,3 +1,4 @@
+# Isolated acceptance of the daily batch; main is never deployed here.
 name: Validate daily Silver on isolated Azure Functions
 on:
   workflow_dispatch:
