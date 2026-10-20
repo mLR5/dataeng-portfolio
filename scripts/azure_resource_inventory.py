@@ -1,6 +1,7 @@
 """Read-only inventory of project infrastructure. Never serialize credentials."""
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,7 +13,8 @@ from azure.storage.queue import QueueServiceClient
 def az(*args):
     result = subprocess.run(['az', *args, '--output', 'json', '--only-show-errors'], capture_output=True, text=True)
     if result.returncode:
-        raise RuntimeError('Azure read failed: ' + ' '.join(args[:2]))
+        code = re.search(r'ERROR: \(([A-Za-z0-9_]+)\)', result.stderr)
+        raise RuntimeError((code.group(1) if code else 'read_failed') + ': ' + ' '.join(args[:2]))
     return json.loads(result.stdout or 'null')
 
 
@@ -41,8 +43,12 @@ for resource in sorted(resources, key=lambda r: (r['type'].lower(), r['name'])):
         details = az('resource', 'show', '--ids', resource['id'], '--api-version', '2020-02-02')
         workspace = details.get('properties', {}).get('WorkspaceResourceId')
         if workspace:
-            linked = az('resource', 'show', '--ids', workspace, '--api-version', '2023-09-01')
-            report['linked_resources'].append({k: linked.get(k) for k in ('name', 'type', 'location', 'resourceGroup')})
+            try:
+                linked = az('resource', 'show', '--ids', workspace, '--api-version', '2023-09-01')
+                report['linked_resources'].append({k: linked.get(k) for k in ('name', 'type', 'location', 'resourceGroup')})
+            except RuntimeError as exc:
+                parts = workspace.split('/')
+                report['linked_resources'].append({'name': parts[-1], 'type': '/'.join(parts[-3:-1]), 'resourceGroup': parts[4], 'details_readable': False, 'read_error': str(exc)})
     elif kind == 'microsoft.insights/scheduledqueryrules':
         details = az('resource', 'show', '--ids', resource['id'], '--api-version', '2023-12-01')
         props = details.get('properties', {})
