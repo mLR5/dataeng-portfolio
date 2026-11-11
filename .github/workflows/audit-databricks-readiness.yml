@@ -1,0 +1,141 @@
+name: Audit existing Azure subscription for Databricks
+
+# Bootstrap read-only inventory on a separate audit branch. No deployment.
+on:
+  push:
+    branches: [audit/databricks-readiness]
+    paths: ['.github/workflows/audit-databricks-readiness.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: audit-databricks-readiness
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: dev
+    steps:
+      - name: Azure login with OIDC
+        if: vars.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.TF_VAR_SUBSCRIPTION_ID }}
+      - name: Azure login with existing project identity
+        if: vars.AZURE_CLIENT_ID == ''
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Collect resource metadata without reading secrets or data
+        if: always()
+        env:
+          PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
+          DEPLOYMENT_ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+          STORAGE_ACCOUNT_NAME: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+          CONFIGURED_LOCATION: ${{ secrets.TF_VAR_LOCATION }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          report = {
+              "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+              "scope": "Existing project Azure subscription; control-plane metadata only",
+              "read_only": True,
+              "data_plane_access_tested": False,
+              "unity_catalog_access_tested": False,
+              "checks": {},
+              "errors": [],
+          }
+
+          def read(label, arguments):
+              try:
+                  result = subprocess.run(
+                      ["az", *arguments, "--only-show-errors", "--output", "json"],
+                      capture_output=True, text=True, timeout=90, check=False,
+                  )
+                  if result.returncode:
+                      known = (
+                          "AuthorizationFailed", "AuthenticationFailed", "Forbidden",
+                          "ResourceGroupNotFound", "ResourceNotFound", "SubscriptionNotFound",
+                          "MissingSubscriptionRegistration", "InvalidAuthenticationToken",
+                      )
+                      code = next((value for value in known if value in result.stderr), "azure_cli_failed")
+                      report["errors"].append({"check": label, "code": code, "exit_code": result.returncode})
+                      return None
+                  value = json.loads(result.stdout)
+                  report["checks"][label] = value
+                  return value
+              except subprocess.TimeoutExpired:
+                  code = "command_timeout"
+              except json.JSONDecodeError:
+                  code = "invalid_json_response"
+              except OSError:
+                  code = "command_unavailable"
+              report["errors"].append({"check": label, "code": code})
+              return None
+
+          project = os.environ.get("PROJECT_NAME", "")
+          environment = os.environ.get("DEPLOYMENT_ENVIRONMENT", "")
+          account_name = os.environ.get("STORAGE_ACCOUNT_NAME", "")
+          resource_group = f"rg-{project}-{environment}"
+          if not project or not environment or not re.fullmatch(r"[A-Za-z0-9._()\-]+", resource_group):
+              report["errors"].append({"check": "configuration", "code": "missing_or_invalid_project_scope"})
+          else:
+              report["resource_group"] = resource_group
+              read("subscription", ["account", "show", "--query", "{id:id,name:name,tenant_id:tenantId,state:state}"])
+              read("resource_groups", ["group", "list", "--query", "[].{id:id,name:name,location:location}"])
+              group = read("project_group", ["group", "show", "--name", resource_group, "--query", "{id:id,name:name,location:location}"])
+              read("project_resources", ["resource", "list", "--resource-group", resource_group, "--query", "[].{id:id,name:name,type:type,location:location}"])
+              workspaces = read("databricks_workspaces", ["resource", "list", "--resource-type", "Microsoft.Databricks/workspaces", "--query", "[].{id:id,name:name,resource_group:resourceGroup,location:location}"])
+              for index, workspace in enumerate(workspaces or []):
+                  if workspace.get("resource_group") == resource_group:
+                      read(f"project_workspace_{index}", ["resource", "show", "--ids", workspace["id"], "--query", "{id:id,name:name,location:location,sku:sku.name,workspace_url:properties.workspaceUrl,provisioning_state:properties.provisioningState,public_network_access:properties.publicNetworkAccess}"])
+              read("databricks_provider", ["provider", "show", "--namespace", "Microsoft.Databricks", "--query", "{namespace:namespace,registration_state:registrationState,workspace_types:resourceTypes[?resourceType=='workspaces'].{name:resourceType,locations:locations}}"])
+              if account_name and re.fullmatch(r"[a-z0-9]{3,24}", account_name):
+                  read("storage_capabilities", ["storage", "account", "show", "--name", account_name, "--resource-group", resource_group, "--query", "{id:id,name:name,location:location,kind:kind,sku:sku.name,is_hns_enabled:isHnsEnabled,public_network_access:publicNetworkAccess,allow_shared_key_access:allowSharedKeyAccess,minimum_tls_version:minimumTlsVersion,provisioning_state:provisioningState}"])
+              else:
+                  report["errors"].append({"check": "storage_configuration", "code": "missing_or_invalid_storage_account"})
+              location = (group or {}).get("location") or os.environ.get("CONFIGURED_LOCATION", "")
+              if location:
+                  read("compute_quota", ["vm", "list-usage", "--location", location, "--query", "[?name.value=='cores' || name.value=='standardDSv3Family' || name.value=='standardDv3Family'].{name:name.value,current:currentValue,limit:limit,unit:unit}"])
+                  read("reference_sku", ["vm", "list-skus", "--location", location, "--size", "Standard_D4s_v3", "--resource-type", "virtualMachines", "--all", "--query", "[].{name:name,locations:locations,restrictions:restrictions}"])
+
+          report["complete"] = not report["errors"]
+          Path("databricks-readiness.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+          summary = [
+              "## Existing Azure subscription readiness audit",
+              "", "Read-only control-plane metadata. No keys, tokens, secrets or blob contents were requested.",
+              f"Successful checks: {len(report['checks'])}. Failed checks: {len(report['errors'])}.",
+              "Databricks data-plane access and Unity Catalog were not tested.",
+          ]
+          subscription = report["checks"].get("subscription") or {}
+          if subscription.get("id"):
+              summary.append(f"Subscription: `{subscription['id']}`.")
+          for error in report["errors"]:
+              summary.append(f"- `{error['check']}`: `{error['code']}`")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
+              stream.write("\n".join(summary) + "\n")
+          print(f"Read-only audit: {len(report['checks'])} checks succeeded, {len(report['errors'])} failed.")
+          sys.exit(0 if report["complete"] else 1)
+          PY
+      - name: Preserve sanitized audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: databricks-readiness
+          path: databricks-readiness.json
+          if-no-files-found: warn
+          retention-days: 14
