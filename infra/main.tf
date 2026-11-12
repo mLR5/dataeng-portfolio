@@ -8,6 +8,10 @@ terraform {
       source  = "Azure/azapi"
       version = "~> 2.0"
     }
+    databricks = {
+      source  = "databricks/databricks"
+      version = "~> 1.80"
+    }
   }
 
   backend "azurerm" {
@@ -21,9 +25,20 @@ provider "azurerm" {
   subscription_id = var.subscription_id
 }
 
-# Only used by infra/databricks.tf, which is disabled by default.
+# The two providers below are only used by infra/databricks.tf (disabled by default).
 provider "azapi" {
   subscription_id = var.subscription_id
+}
+
+# Workspace created in this same configuration. With the workspace resource ID the
+# provider also sends the Azure management token, which makes the deployment service
+# principal workspace admin on first use (validated by probe/databricks-serverless).
+provider "databricks" {
+  host                        = local.databricks_url
+  azure_workspace_resource_id = var.databricks_enabled ? azapi_resource.databricks_workspace[0].id : null
+  azure_client_id             = var.databricks_enabled ? var.databricks_client_id : null
+  azure_client_secret         = var.databricks_enabled ? var.databricks_client_secret : null
+  azure_tenant_id             = var.databricks_enabled ? var.databricks_tenant_id : null
 }
 
 # Resource Group
@@ -88,6 +103,8 @@ module "function_app" {
 
   application_insights_key               = module.application_insights.instrumentation_key
   application_insights_connection_string = module.application_insights.connection_string
+  # Same spelling as the value the portal writes, so the plan shows no tag change.
+  application_insights_id                = replace(module.application_insights.id, "/providers/Microsoft.Insights/", "/providers/microsoft.insights/")
 
   weatherapi_secret_uri = "${module.keyvault.vault_uri}secrets/weather-api-key"
   queue_name            = module.storage.queue_name

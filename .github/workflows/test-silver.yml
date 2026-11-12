@@ -1,9 +1,10 @@
-name: Test Silver Delta
+name: Test Silver notebooks
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,22 +12,25 @@ permissions:
 jobs:
   silver:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: pip
-          cache-dependency-path: |
-            requirements-dev.txt
-            requirements-silver.txt
-            functions/requirements.txt
-      - name: Install Bronze and Silver dependencies
-        run: python -m pip install -r requirements-dev.txt -r requirements-silver.txt
-      - name: Validate dependency compatibility
-        run: python -m pip check
-      - name: Test Bronze and Silver including real local Delta tables
-        run: python -m pytest -q
+          cache-dependency-path: requirements-databricks.txt
+      - name: Install Spark, Delta and test dependencies
+        run: python -m pip install -r requirements-databricks.txt
+      - name: Run the notebooks' rules and pipeline tests against real local Delta tables
+        run: |
+          set -o pipefail
+          python -m pytest databricks/tests -q -p no:cacheprovider -o testpaths=databricks/tests -rs | tee /tmp/silver-tests.txt
+          # Delta tests skip without Maven access; in CI a skip would hide the real proof.
+          ! grep -q "Delta Lake jars unavailable" /tmp/silver-tests.txt

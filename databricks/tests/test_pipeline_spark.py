@@ -5,10 +5,10 @@ import pyarrow as pa
 import pytest
 from pyspark.sql import types as T
 
-from shared.silver_checks import bronze_identity
-from shared.silver_contract import FORECAST_TABLE, OBSERVATION_TABLE, TABLE_SCHEMAS
-from silver_spark.discovery import list_bronze, load_sources
-from silver_spark.schemas import KEYS, SPARK_SCHEMAS, SilverPaths, ddl, spark_type
+from silver_pipeline import (
+    FORECAST_TABLE, KEYS, OBSERVATION_TABLE, SPARK_SCHEMAS, TABLE_SCHEMAS, SilverPaths,
+    bronze_identity, ddl, list_bronze, load_sources, spark_type,
+)
 
 from conftest import real_sources, write_bronze
 

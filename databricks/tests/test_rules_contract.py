@@ -3,12 +3,11 @@ from dataclasses import asdict
 from datetime import date, datetime, timezone
 import json
 
-from deltalake import DeltaTable, write_deltalake
 import pyarrow as pa
 import pytest
 
-from shared.silver_cities import CITIES, CityResolutionError, city_by_query, resolve_city
-from shared.silver_contract import (
+from silver_rules import CITIES, CityResolutionError, city_by_query, resolve_city
+from silver_rules import (
     FORECAST_KEYS, FORECAST_SCHEMA, FORECAST_TABLE, OBSERVATION_KEYS,
     OBSERVATION_SCHEMA, OBSERVATION_TABLE, Rejection, SCHEMA_VERSION,
     SOURCE, TABLE_KEYS, TABLE_SCHEMAS, TRANSFORM_VERSION, TransformResult, empty_table,
@@ -52,28 +51,6 @@ def test_explicit_contract_has_complete_keys_and_utc(name):
     assert schema.field("humidity_pct").nullable is True
     assert empty_table(name).schema.equals(schema)
     assert empty_table(name).num_rows == 0
-
-
-@pytest.mark.parametrize("name", list(TABLE_SCHEMAS))
-def test_create_two_real_delta_tables_roundtrip_schema_utc_and_merge(tmp_path, name):
-    """Actual delta-rs creates logs/Parquet, then reads and merges; not a mock."""
-    schema = TABLE_SCHEMAS[name]
-    table_path = tmp_path / name
-    delta = DeltaTable.create(table_path, schema=schema)
-    assert (table_path / "_delta_log" / "00000000000000000000.json").is_file()
-    assert delta.to_pyarrow_table().num_rows == 0
-    assert delta.protocol().min_reader_version == 1
-    assert delta.protocol().min_writer_version == 2
-    data = pa.Table.from_pylist([synthetic_row(name)], schema=schema)
-    write_deltalake(table_path, data, mode="append")
-    delta = DeltaTable(table_path)
-    actual = delta.to_pyarrow_table()
-    assert actual.schema.equals(schema, check_metadata=False)
-    assert actual.to_pylist() == data.to_pylist()
-    predicate = " AND ".join(f"target.{key} = incoming.{key}" for key in TABLE_KEYS[name])
-    delta.merge(data, predicate=predicate, source_alias="incoming", target_alias="target").when_not_matched_insert_all().execute()
-    assert DeltaTable(table_path).to_pyarrow_table().num_rows == 1
-    assert DeltaTable(table_path).to_pyarrow_table().to_pylist() == data.to_pylist()
 
 
 def test_snapshot_keys_preserve_collection_history():

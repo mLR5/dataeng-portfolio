@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from shared.silver_quality import QualityError, boolean, instant, number
+from silver_rules import QualityError, boolean, instant, number
 
 
 @pytest.mark.parametrize("raw,expected", [("12.5", 12.5), ("-1.25e1", -12.5), (0, 0.0)])

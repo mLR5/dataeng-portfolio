@@ -41,8 +41,3 @@ plan/
 htmlcov/
 coverage.xml
 
-# Databricks Silver wheel and bundle
-build/
-dist/
-*.egg-info/
-.databricks/

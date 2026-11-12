@@ -1,29 +1,23 @@
-"""Real Delta tables written by Spark, compared with the S3 delta-rs runner.
+"""Real Delta tables written by Spark from the notebook code.
 
 These tests need the Delta Lake jars (resolved from Maven in CI). They prove:
-parity with S3 on real-derived Bronze, replay without commit, repair after an
+the stored rows equal the transformer output on real-derived Bronze, replay without commit, repair after an
 interruption between tables, refusal of changed rows or Bronze, the Gold barrier,
 and that delta-rs 1.2.1 can still read what Spark wrote.
 """
 from datetime import datetime, timedelta, timezone
 import json
-from types import SimpleNamespace
 
 import pyarrow as pa
 import pytest
 from deltalake import DeltaTable
 
-from shared.silver_checks import PublicationConflict
-from shared.silver_contract import FORECAST_TABLE, OBSERVATION_TABLE, TABLE_KEYS, TABLE_SCHEMAS
-from shared.silver_delta import DeltaSnapshotWriter
-from shared.silver_publication import publication_name
-from shared.silver_runner import SilverRunner
-from shared.silver_transform import transform_bronze
-from silver_spark import engine as engine_module
-from silver_spark.engine import SnapshotConflict, Source, ensure_tables, process_sources
-from silver_spark.gold import published_read_plan, read_published
-from silver_spark.job import freshness, run
-from silver_spark.schemas import PUBLICATIONS, QUARANTINE, SilverPaths
+import silver_pipeline as engine_module
+from silver_pipeline import (
+    FORECAST_TABLE, OBSERVATION_TABLE, PUBLICATIONS, QUARANTINE, TABLE_KEYS, TABLE_SCHEMAS,
+    PublicationConflict, SilverPaths, SnapshotConflict, Source, ensure_tables, freshness,
+    process_sources, published_read_plan, read_published, run, transform_bronze,
+)
 
 from conftest import real_sources, write_bronze
 
@@ -40,30 +34,6 @@ def _versions(spark, paths):
             for name in (OBSERVATION_TABLE, FORECAST_TABLE, PUBLICATIONS, QUARANTINE)}
 
 
-def _s3_publish(root, sources):
-    """Reference: the merged S3 runner with in-memory controls and a no-op lease."""
-    controls = {}
-    store = SimpleNamespace(read=controls.get, create=lambda k, v: controls.setdefault(k, v))
-    class Lease:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        def assert_held(self):
-            pass
-
-    publications = {}
-    for blob, raw in sources:
-        container = SimpleNamespace(get_blob_client=lambda _b, raw=raw: SimpleNamespace(
-            download_blob=lambda: SimpleNamespace(readall=lambda: raw)))
-        runner = SilverRunner(container, store, DeltaSnapshotWriter(root), Lease, transform_bronze)
-        result = runner.process_ingestion(blob)
-        publications[result.ingestion_id] = result.publication
-    return publications, controls
-
-
 @pytest.fixture
 def silver(delta_spark, tmp_path):
     paths = SilverPaths(f"file://{tmp_path}/silver")
@@ -75,28 +45,34 @@ def _sources(items):
     return [Source(blob, raw) for blob, raw in items]
 
 
-def test_spark_matches_the_s3_runner_row_for_row(delta_spark, silver, tmp_path):
+def _sorted(rows, name):
+    return sorted(rows, key=lambda r: tuple(str(r[k]) for k in TABLE_KEYS[name]))
+
+
+def test_delta_tables_hold_exactly_the_transformer_output(delta_spark, silver):
     items = real_sources() + [(INVALID_BLOB, b"{not json")]
     batch = process_sources(delta_spark, silver, _sources(items))
     assert sorted(batch.statuses.items()) == [("partial", 2), ("rejected", 1)]
 
-    reference, controls = _s3_publish(str(tmp_path / "s3"), items)
+    results = {Source(blob, raw).ingestion_id: transform_bronze(raw, blob) for blob, raw in items}
     for name in (OBSERVATION_TABLE, FORECAST_TABLE):
-        assert _rows(silver.table(name), name) == _rows(str(tmp_path / "s3" / name), name)
+        expected = [row for result in results.values() for row in result.tables[name].to_pylist()]
+        assert _rows(silver.table(name), name) == _sorted(expected, name)
 
     published = {r["ingestion_id"]: r for r in delta_spark.read.format("delta")
                  .load(silver.table(PUBLICATIONS)).collect()}
-    assert set(published) == set(reference)
-    for ingestion_id, expected in reference.items():
+    assert set(published) == set(results)
+    quarantine = delta_spark.read.format("delta").load(silver.table(QUARANTINE)).collect()
+    for ingestion_id, result in results.items():
         row = published[ingestion_id]
-        assert row["status"] == expected["status"]
-        assert json.loads(row["summary_json"]) == expected["summary"]
-        assert row["source_sha256"] == expected["source_sha256"]
-        assert row["quarantine_count"] == expected["quarantine"]["count"]
-        assert row["quarantine_sha256"] == expected["quarantine"]["sha256"]
-        assert row["observation_row_count"] == expected["tables"][OBSERVATION_TABLE]["row_count"]
-        assert row["forecast_row_count"] == expected["tables"][FORECAST_TABLE]["row_count"]
-        assert controls[publication_name(ingestion_id)]
+        assert row["status"] == result.status
+        assert json.loads(row["summary_json"]) == result.summary
+        assert row["source_sha256"] == result.source_sha256
+        assert row["quarantine_count"] == len(result.rejections)
+        assert row["observation_row_count"] == result.observations.num_rows
+        assert row["forecast_row_count"] == result.forecasts.num_rows
+        codes = [(q["rejection_index"], q["code"]) for q in quarantine if q["ingestion_id"] == ingestion_id]
+        assert sorted(codes) == [(i, r.code) for i, r in enumerate(result.rejections)]
 
 
 def test_real_fixtures_keep_the_known_london_rejection(delta_spark, silver):

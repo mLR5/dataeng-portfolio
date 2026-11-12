@@ -7,18 +7,17 @@ accompagnées d'une provenance réelle constituent des observations du fournisse
 
 ## Versions et interface communes
 
-- `functions/shared/silver_contract.py` est l'unique définition des schémas,
-  clés, versions et dataclasses.
+- Le notebook `databricks/notebooks/silver_rules.py` est l'unique définition des
+  schémas, clés, versions et dataclasses (section « Contrat Silver »). Il est
+  chargé par `%run` dans le pipeline Spark et testé en CI ; la Function App ne
+  contient plus aucun code Silver.
 - `SCHEMA_VERSION=1`, `TRANSFORM_VERSION="1.0.0"`, `SOURCE="weatherapi"`.
-- Python cible : **3.11 Linux**, identique à Azure Functions. Les tests locaux
-  S1 ont tourné sous Python **3.12.14** ; la CI dédiée exécute Python 3.11.
-- Dépendances isolées dans `requirements-silver.txt` : **deltalake 1.2.1**
-  (delta-rs) et **PyArrow 21.0.0**. Le paquet Functions Bronze n'est pas modifié
-  par S1 ; son adoption et sa validation au déploiement relèvent de S4.
-- `transform_bronze(raw: bytes, source_blob: str) -> TransformResult` est
-  implémenté par S2 dans `shared.silver_transform` sans I/O.
-- S3 consomme `result.tables`, `TABLE_SCHEMAS`, `TABLE_KEYS`, `result.rejections`
-  et `result.summary`. S1 ne dépend ni du writer ni du transformateur.
+- Exécution : Databricks serverless. Tests : Python 3.11 Linux en CI avec
+  **PyArrow 21.0.0**, PySpark et Delta Lake (`requirements-databricks.txt`).
+- `transform_bronze(raw: bytes, source_blob: str) -> TransformResult` est défini
+  dans le même notebook, sans I/O.
+- Le pipeline (`silver_pipeline.py`) consomme `result.tables`, `TABLE_SCHEMAS`,
+  `TABLE_KEYS`, `result.rejections` et `result.summary`.
 
 `TransformResult` contient les tables Arrow `observations`, `forecasts`, les
 alias `observation_snapshots`/`forecast_hourly_snapshots`, les rejets immuables,
@@ -92,7 +91,7 @@ Pas de valeur météo zéro inventée et pas d'interpolation en Silver.
 
 ## Identité des villes et temps
 
-`shared.silver_cities` versionne trois identifiants stables : `fr_paris`,
+La section « Registre des villes » de `silver_rules` versionne trois identifiants stables : `fr_paris`,
 `gb_london`, `be_brussels`. `city_by_query()` résout les alias de requête ;
 `resolve_city(query, location)` vérifie pays, fuseau IANA et coordonnées dans
 une zone métropolitaine contrôlée. Le libellé du fournisseur n'est jamais clé.
@@ -190,32 +189,22 @@ Les extraits doivent donner à S2 un résultat `partial`, **2 observations et
 144 prévisions**. La couverture horaire des extraits est volontairement
 incomplète et ne mesure pas l'horizon initial du fournisseur.
 
-## Validation exécutée et limites
-
-Commande S1 :
+## Validation
 
 ```sh
-python -m pip install -r requirements-dev.txt -r requirements-silver.txt
-python -m pytest tests/test_silver_contract.py -q
+python -m pip install -r requirements-databricks.txt
+python -m pytest databricks/tests -o testpaths=databricks/tests
 ```
 
-Résultat local S1 : **24 tests nouveaux, 191 tests avec la suite Bronze**
-sous Python3.12.14 ; `pip check` réussit. Les tests créent réellement les deux tables Delta sur filesystem local,
-initialement vides, insèrent des lots typés, les relisent et réalisent un
-`MERGE` insert-only rejoué sans doublon. Ils vérifient timestamp UTC à la
-microseconde, dates, types, nullabilité, alias des villes et provenance d'un
-résultat rejeté. Ils n'utilisent aucune doublure pour delta-rs.
+Les tests chargent les notebooks tels que Databricks les exécute (`%run` compris)
+et vérifient types, nullabilité, timestamps UTC à la microseconde, alias des
+villes et provenance d'un résultat rejeté. L'écriture Delta réelle (création,
+`MERGE` insert-only rejoué sans doublon, relecture) est couverte par
+`databricks/tests/test_pipeline_delta.py`, exécuté dans
+`.github/workflows/test-silver.yml`, qui échoue si un test Delta est ignoré.
 
-Le workflow Bronze existant ignore les modules `tests/test_silver*.py` pour
-conserver son environnement de dépendances indépendant. Le workflow
-`.github/workflows/test-silver.yml` teste toutes les PR, y compris empilées,
-et exécute la suite sur Python3.11 Linux et
-`pip check`. La présence du workflow n'est pas une preuve de son exécution ;
-le statut réel du run GitHub doit être vérifié après publication.
-
-**Restent à valider sur Azure en S4** : build distant complet et découverte des
-Functions Bronze/Silver, taille/mémoire du paquet, authentification ADLS réelle,
-lease et perte de lease, concurrence/transactions sur object store, reprise
-entre tables et lecture Gold. Le succès local ne prouve pas ces garanties ADLS.
-Aucune table Silver métier Azure n'est créée et aucune modification de données
-Azure n'est réalisée par S1.
+Historique : S1 avait validé ce contrat avec delta-rs, puis S3 l'avait accepté sur
+ADLS. Avant le retrait de delta-rs, la CI de la PR #10 a montré que Spark produit
+exactement les mêmes lignes que le runner S3 sur les Bronze dérivés de captures
+réelles. L'acceptation Azure du job Databricks est la phase 4 de
+[l'ADR 0001](adr/0001-silver-databricks-serverless.md).

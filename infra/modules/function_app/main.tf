@@ -63,7 +63,11 @@ resource "azurerm_function_app_flex_consumption" "this" {
     type = "SystemAssigned"
   }
 
-  tags = var.tags
+  # The Azure portal links the Function App to Application Insights through this
+  # tag. Declared here so that terraform apply keeps it instead of removing it.
+  tags = merge(var.tags, {
+    "hidden-link: /app-insights-resource-id" = var.application_insights_id
+  })
 
   depends_on = [azurerm_storage_container.deployment]
 }

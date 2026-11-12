@@ -1,0 +1,8 @@
+# Tests of the Databricks Silver notebooks (CI and local). Databricks provides its
+# own Spark, Delta and pyarrow at runtime; nothing here is installed there.
+pyspark==4.0.5
+delta-spark==4.0.1
+pyarrow==21.0.0
+# Reader-only check that Spark-written tables stay readable by other Delta engines.
+deltalake==1.2.1
+pytest>=7.4.0,<10
