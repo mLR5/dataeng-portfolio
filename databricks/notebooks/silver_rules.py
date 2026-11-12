@@ -1,9 +1,396 @@
-"""Deterministic Bronze JSON -> typed WeatherAPI snapshots, without I/O.
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Silver WeatherAPI : règles
+# MAGIC
+# MAGIC Contrat des deux tables, registre des villes, contrôles de qualité, transformation
+# MAGIC d'un JSON Bronze et contrôles de cohérence. Python pur, sans Spark ni I/O :
+# MAGIC ce notebook est chargé par `%run` et testé en CI.
 
-Only ``current`` produces observations. Forecast snapshots remain forecasts even
-when their target time precedes collection. Identity includes the ingestion, so
-separate collections never overwrite one another in this layer.
-"""
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Contrat Bronze lu par Silver
+
+# COMMAND ----------
+
+import re
+from datetime import datetime, timezone
+
+# Bronze path contract, owned by the Function App (functions/shared/claim_check.py
+# and functions/shared/config.py). Silver only reads it; a change there must be mirrored here.
+BRONZE_PATH_PREFIX = "weather/weatherapi"
+# Old IDs "YYYYMMDD_HHMMSS", new IDs "YYYYMMDD_HHMMSS_<uuid4 hex>".
+INGESTION_ID_PATTERN = re.compile(r"^\d{8}_\d{6}(_[0-9a-f]{32})?$")
+
+
+def parse_timestamp(value):
+    """ISO timestamp in UTC; old timestamps without offset are already UTC."""
+    timestamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return timestamp.astimezone(timezone.utc)
+
+
+def bronze_blob_name(ingestion_id, ingestion_timestamp):
+    """Deterministic Bronze path: one ingestion always maps to the same blob."""
+    partition = f"{parse_timestamp(ingestion_timestamp):%Y/%m/%d/%H}"
+    return f"{BRONZE_PATH_PREFIX}/{partition}/{ingestion_id}_weather_data.json"
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Contrat Silver
+# MAGIC
+# MAGIC Versioned, I/O-free contracts shared by Silver transformation and Delta storage.
+# MAGIC
+# MAGIC Changing produced values requires a new TRANSFORM_VERSION and a separate output
+# MAGIC root. Delta commit versions are storage versions, not transformation versions.
+
+# COMMAND ----------
+
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from typing import Any, Literal
+
+import pyarrow as pa
+
+SCHEMA_VERSION = 1
+TRANSFORM_VERSION = "1.0.0"
+SOURCE = "weatherapi"
+SilverStatus = Literal["success", "partial", "rejected", "empty"]
+SILVER_STATUSES = ("success", "partial", "rejected", "empty")
+OBSERVATION_TABLE = "observation_snapshots"
+FORECAST_TABLE = "forecast_hourly_snapshots"
+UTC_TIMESTAMP = pa.timestamp("us", tz="UTC")
+
+# Unpartitioned Delta tables initially: ingestion_date remains useful for filters.
+COMMON_FIELDS = [
+    pa.field("schema_version", pa.int16(), nullable=False),
+    pa.field("transform_version", pa.string(), nullable=False),
+    pa.field("source", pa.string(), nullable=False),
+    pa.field("ingestion_id", pa.string(), nullable=False),
+    pa.field("collected_at_utc", UTC_TIMESTAMP, nullable=False),
+    pa.field("ingestion_date", pa.date32(), nullable=False),
+    pa.field("city_id", pa.string(), nullable=False),
+    pa.field("city_query", pa.string(), nullable=False),
+    pa.field("source_location_name", pa.string()),
+    pa.field("source_country", pa.string()),
+    pa.field("latitude", pa.float64(), nullable=False),
+    pa.field("longitude", pa.float64(), nullable=False),
+    pa.field("source_timezone", pa.string(), nullable=False),
+    pa.field("source_blob", pa.string(), nullable=False),
+    pa.field("source_sha256", pa.string(), nullable=False),
+]
+WEATHER_FIELDS = [
+    pa.field("temperature_c", pa.float64(), nullable=False),
+    pa.field("feels_like_c", pa.float64()),
+    pa.field("humidity_pct", pa.int16()),
+    pa.field("pressure_mb", pa.float64()),
+    pa.field("wind_kph", pa.float64()),
+    pa.field("wind_degree", pa.int16()),
+    pa.field("precipitation_mm", pa.float64()),
+    pa.field("cloud_pct", pa.int16()),
+    pa.field("condition_code", pa.int32()),
+    pa.field("condition_text", pa.string()),
+    pa.field("is_day", pa.bool_()),
+]
+OBSERVATION_SCHEMA = pa.schema(COMMON_FIELDS + [
+    pa.field("observed_at_utc", UTC_TIMESTAMP, nullable=False),
+] + WEATHER_FIELDS)
+FORECAST_SCHEMA = pa.schema(COMMON_FIELDS + [
+    pa.field("target_at_utc", UTC_TIMESTAMP, nullable=False),
+    pa.field("target_local_date", pa.date32(), nullable=False),
+    pa.field("lead_time_hours", pa.float64(), nullable=False),
+    pa.field("target_is_past_at_collection", pa.bool_(), nullable=False),
+] + WEATHER_FIELDS + [
+    pa.field("chance_of_rain_pct", pa.int16()),
+    pa.field("chance_of_snow_pct", pa.int16()),
+])
+OBSERVATION_KEYS = ("ingestion_id", "city_id", "observed_at_utc")
+FORECAST_KEYS = ("ingestion_id", "city_id", "target_at_utc")
+TABLE_SCHEMAS = {OBSERVATION_TABLE: OBSERVATION_SCHEMA, FORECAST_TABLE: FORECAST_SCHEMA}
+TABLE_KEYS = {OBSERVATION_TABLE: OBSERVATION_KEYS, FORECAST_TABLE: FORECAST_KEYS}
+
+# Stable quarantine codes; messages remain fixed descriptions, not SDK exceptions.
+REJECTION_CODES = frozenset({
+    "invalid_json", "invalid_envelope", "invalid_ingestion_id", "invalid_timestamp",
+    "source_path_mismatch", "summary_mismatch", "unknown_city", "location_mismatch",
+    "collection_failed", "missing_field", "invalid_type", "out_of_range",
+    "non_finite", "duplicate_conflict", "invalid_timezone", "invalid_forecast",
+    "invalid_date", "ambiguous_local_time", "nonexistent_local_time",
+})
+
+
+@dataclass(frozen=True)
+class Rejection:
+    """Small JSON-safe diagnostic; the Bronze already retains original values.
+
+    source_blob/source_sha256/ingestion_id are attached by the publication writer
+    from TransformResult, avoiding repetition and allowing malformed JSON inputs.
+    """
+    table: str
+    code: str
+    city_query: str | None = None
+    position: str | None = None
+    field: str | None = None
+    message: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class TransformResult:
+    observations: pa.Table
+    forecasts: pa.Table
+    rejections: tuple[Rejection, ...]
+    summary: dict[str, Any]
+    status: SilverStatus
+    ingestion_id: str | None
+    collected_at_utc: datetime | None
+    source_blob: str
+    source_sha256: str
+
+    @property
+    def observation_snapshots(self) -> pa.Table:
+        return self.observations
+
+    @property
+    def forecast_hourly_snapshots(self) -> pa.Table:
+        return self.forecasts
+
+    @property
+    def tables(self) -> dict[str, pa.Table]:
+        return {OBSERVATION_TABLE: self.observations, FORECAST_TABLE: self.forecasts}
+
+
+def empty_table(table_name: str) -> pa.Table:
+    """An empty result still carries the full schema and required-field flags."""
+    return pa.Table.from_pylist([], schema=TABLE_SCHEMAS[table_name])
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Registre des villes
+# MAGIC
+# MAGIC Versioned identity registry: labels are aliases, never primary keys.
+
+# COMMAND ----------
+
+from dataclasses import dataclass
+import math
+import unicodedata
+from typing import Any, Mapping
+
+REGISTRY_VERSION = 1
+
+
+def _normalise(value: str) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = unicodedata.normalize("NFKD", value.strip().casefold())
+    return " ".join("".join(c for c in text if not unicodedata.combining(c)).split())
+
+
+@dataclass(frozen=True)
+class CityDefinition:
+    city_id: str
+    timezone: str
+    query_aliases: tuple[str, ...]
+    country_aliases: tuple[str, ...]
+    latitude_bounds: tuple[float, float]
+    longitude_bounds: tuple[float, float]
+
+
+CITIES = (
+    CityDefinition("fr_paris", "Europe/Paris", ("Paris",),
+                   ("France",), (48.5, 49.2), (1.9, 2.8)),
+    CityDefinition("gb_london", "Europe/London", ("Londres", "London"),
+                   ("United Kingdom", "UK", "United Kingdom of Great Britain and Northern Ireland"),
+                   (51.1, 51.9), (-0.6, 0.3)),
+    CityDefinition("be_brussels", "Europe/Brussels", ("Bruxelles", "Brussels", "Brussel"),
+                   ("Belgium", "Belgique", "Belgie"), (50.5, 51.2), (3.9, 4.8)),
+)
+CITY_BY_ID = {city.city_id: city for city in CITIES}
+_CITY_BY_QUERY = {_normalise(alias): city for city in CITIES for alias in city.query_aliases}
+
+
+class CityResolutionError(ValueError):
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+def city_by_query(query: str) -> CityDefinition | None:
+    return _CITY_BY_QUERY.get(_normalise(query))
+
+
+def resolve_city(query: str, location: Mapping[str, Any]) -> CityDefinition:
+    """Validate geography, country and IANA zone independently of source label.
+
+    Bounds intentionally allow provider rounding/nearby metropolitan coordinates.
+    Registry changes must be reviewed when adding cities or source aliases.
+    """
+    city = city_by_query(query)
+    if city is None:
+        raise CityResolutionError("unknown_city", "Requested city is absent from the versioned registry")
+    if not isinstance(location, Mapping):
+        raise CityResolutionError("location_mismatch", "Location must be an object")
+    if location.get("tz_id") != city.timezone:
+        raise CityResolutionError("location_mismatch", "Location timezone differs from the registered city")
+    if _normalise(location.get("country")) not in {_normalise(c) for c in city.country_aliases}:
+        raise CityResolutionError("location_mismatch", "Location country differs from the registered city")
+    for key, bounds in (("lat", city.latitude_bounds), ("lon", city.longitude_bounds)):
+        value = location.get(key)
+        if isinstance(value, bool):
+            raise CityResolutionError("location_mismatch", "Location coordinates are invalid")
+        try:
+            number = float(value)
+        except (ValueError, TypeError):
+            raise CityResolutionError("location_mismatch", "Location coordinates are invalid") from None
+        if not math.isfinite(number) or not bounds[0] <= number <= bounds[1]:
+            raise CityResolutionError("location_mismatch", "Location coordinates differ from the registered city")
+    return city
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Qualité
+# MAGIC
+# MAGIC Pure parsing rules used by the WeatherAPI Silver transformation.
+# MAGIC
+# MAGIC Errors contain stable codes and field names, never the rejected source value.
+# MAGIC Missing optional metrics remain null; malformed supplied metrics reject a row.
+
+# COMMAND ----------
+
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+import math
+import re
+from zoneinfo import ZoneInfo
+
+
+_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+_LOCAL_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}(?::[0-9]{2})?\Z")
+
+
+class QualityError(ValueError):
+    """A deterministic data rejection, distinct from a technical failure."""
+
+    def __init__(self, code, field, message):
+        super().__init__(message)
+        self.code = code
+        self.field = field
+
+
+def number(value, field, *, required=False, integer=False, minimum=None, maximum=None):
+    """Parse finite JSON numbers or unambiguous decimal strings without coercing bools."""
+    if value is None:
+        if required:
+            raise QualityError("missing_field", field, "Required metric is missing")
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise QualityError("invalid_type", field, "Metric must be numeric")
+    if isinstance(value, str) and not _NUMBER.fullmatch(value):
+        raise QualityError("invalid_type", field, "Metric is not an unambiguous number")
+    try:
+        decimal = Decimal(str(value))
+        if not decimal.is_finite():
+            raise ValueError
+        if integer:
+            if decimal != decimal.to_integral_value():
+                raise QualityError("invalid_type", field, "Metric must be an integer")
+            parsed = int(decimal)
+        else:
+            parsed = float(decimal)
+            if not math.isfinite(parsed):
+                raise ValueError
+    except (InvalidOperation, ValueError, OverflowError) as error:
+        if isinstance(error, QualityError):
+            raise
+        raise QualityError("invalid_type", field, "Metric must be finite") from None
+    if ((minimum is not None and parsed < minimum)
+            or (maximum is not None and parsed > maximum)):
+        raise QualityError("out_of_range", field, "Metric is outside its allowed domain")
+    return parsed
+
+
+def boolean(value, field):
+    """WeatherAPI encodes optional booleans as 0/1, including numeric strings."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return bool(number(value, field, integer=True, minimum=0, maximum=1))
+
+
+def optional_text(value, field):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise QualityError("invalid_type", field, "Text metric must be a string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise QualityError("invalid_type", field, "Text metric must be valid Unicode") from None
+    return value
+
+
+def instant(row, epoch_field, local_field, source_timezone):
+    """Prefer the source epoch; resolve local fallback only when it is unambiguous.
+
+    An epoch remains authoritative during DST: two identical wall-clock hours
+    can therefore survive with distinct UTC keys. An invalid supplied epoch is
+    rejected rather than silently replaced by another field.
+    """
+    epoch = row.get(epoch_field)
+    if epoch is not None:
+        value = number(epoch, epoch_field, required=True, integer=True)
+        try:
+            parsed = datetime.fromtimestamp(value, timezone.utc)
+            # The UTC instant must also be representable in its source timezone.
+            parsed.astimezone(ZoneInfo(source_timezone))
+            return parsed
+        except (ValueError, OverflowError, OSError):
+            raise QualityError("invalid_timestamp", epoch_field, "Epoch is outside supported dates") from None
+    local = row.get(local_field)
+    if local is None:
+        raise QualityError("missing_field", epoch_field, "Source instant is missing")
+    if not isinstance(local, str) or not _LOCAL_TIME.fullmatch(local):
+        raise QualityError("invalid_timestamp", local_field, "Local timestamp has an invalid format")
+    try:
+        wall = datetime.fromisoformat(local)
+    except ValueError:
+        raise QualityError("invalid_timestamp", local_field, "Local timestamp is invalid") from None
+    zone = ZoneInfo(source_timezone)
+    candidates = set()
+    for fold in (0, 1):
+        try:
+            candidate = wall.replace(tzinfo=zone, fold=fold).astimezone(timezone.utc)
+            if candidate.astimezone(zone).replace(tzinfo=None) == wall:
+                candidates.add(candidate)
+        except (ValueError, OverflowError):
+            raise QualityError("invalid_timestamp", local_field, "Local timestamp is outside supported dates") from None
+    if not candidates:
+        raise QualityError("nonexistent_local_time", local_field, "Local timestamp does not exist in this timezone")
+    if len(candidates) != 1:
+        raise QualityError("ambiguous_local_time", local_field, "Local timestamp needs an epoch during DST overlap")
+    return candidates.pop()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Transformation
+# MAGIC
+# MAGIC Deterministic Bronze JSON -> typed WeatherAPI snapshots, without I/O.
+# MAGIC
+# MAGIC Only ``current`` produces observations. Forecast snapshots remain forecasts even
+# MAGIC when their target time precedes collection. Identity includes the ingestion, so
+# MAGIC separate collections never overwrite one another in this layer.
+
+# COMMAND ----------
+
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
@@ -13,14 +400,6 @@ from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 
-from .claim_check import INGESTION_ID_PATTERN, bronze_blob_name, parse_timestamp
-from .silver_cities import CityResolutionError, resolve_city
-from .silver_contract import (
-    FORECAST_KEYS, FORECAST_SCHEMA, FORECAST_TABLE, OBSERVATION_KEYS,
-    OBSERVATION_SCHEMA, OBSERVATION_TABLE, SCHEMA_VERSION, SOURCE,
-    TRANSFORM_VERSION, Rejection, TransformResult,
-)
-from .silver_quality import QualityError, boolean, instant, number, optional_text
 
 
 def _json_object(pairs):
@@ -353,3 +732,75 @@ def transform_bronze(raw: bytes, source_blob: str) -> TransformResult:
             return result(status="empty", reason="collection_failed")
         return result(reason="no_valid_rows")
     return result(observations, forecasts, status="partial" if rejections else "success")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Contrôles de cohérence
+# MAGIC
+# MAGIC Identity of a Bronze source, consistency of a transformation result, canonical
+# MAGIC JSON and quarantine records, applied before anything is written.
+
+# COMMAND ----------
+
+from datetime import date, datetime
+import json
+import re
+
+
+_PATH = re.compile(r'^weather/weatherapi/\d{4}/\d{2}/\d{2}/\d{2}/([^/]+)_weather_data\.json$')
+
+
+class PublicationConflict(ValueError):
+    """Published immutable identity or content does not match this ingestion."""
+
+
+def bronze_identity(source_blob):
+    match = _PATH.fullmatch(source_blob)
+    if not match or not INGESTION_ID_PATTERN.fullmatch(match.group(1)):
+        raise ValueError('Expected a canonical Bronze blob path')
+    return match.group(1)
+
+
+def json_bytes(value):
+    def encode(item):
+        if isinstance(item, (date, datetime)):
+            return item.isoformat()
+        raise TypeError('Non JSON-safe publication value')
+    return json.dumps(value, sort_keys=True, separators=(',', ':'),
+                      ensure_ascii=False, allow_nan=False, default=encode).encode('utf-8')
+
+
+def quarantine_records(result, ingestion_id):
+    """Rejections enriched with provenance, in transformer order."""
+    return [{
+        'ingestion_id': ingestion_id, 'source_blob': result.source_blob,
+        'source_sha256': result.source_sha256, **r.to_dict(),
+    } for r in result.rejections]
+
+
+def validate_transform_result(result, *, ingestion_id, source_blob, source_sha256):
+    """Refuse a transformation whose identity, status or provenance is inconsistent."""
+    if result.source_blob != source_blob or result.source_sha256 != source_sha256:
+        raise PublicationConflict('Transformation provenance differs from Bronze')
+    terminal_empty = result.status == 'rejected' and not any(t.num_rows for t in result.tables.values())
+    if result.ingestion_id not in (None, ingestion_id) and not terminal_empty:
+        raise PublicationConflict('Transformation identity differs from Bronze path')
+    if result.status not in SILVER_STATUSES:
+        raise PublicationConflict('Unknown transformation status')
+    has_rows = any(t.num_rows for t in result.tables.values())
+    if (result.status in ('success', 'partial')) != has_rows:
+        raise PublicationConflict('Transformation status differs from row counts')
+    if result.status == 'empty' and not result.summary.get('reason'):
+        raise PublicationConflict('Empty transformation requires a collection reason')
+    if result.ingestion_id is None and not terminal_empty:
+        raise PublicationConflict('Only rejected empty results may lack identity')
+    expected = {
+        'ingestion_id': ingestion_id, 'source_blob': source_blob,
+        'source_sha256': source_sha256, 'schema_version': SCHEMA_VERSION,
+        'transform_version': TRANSFORM_VERSION,
+    }
+    for rows in result.tables.values():
+        for row in rows.to_pylist():
+            if any(row.get(k) != v for k, v in expected.items()):
+                raise PublicationConflict('Row provenance differs from transformation')

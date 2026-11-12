@@ -13,9 +13,9 @@ from zoneinfo import ZoneInfo
 import pyarrow as pa
 import pytest
 
-from shared.claim_check import bronze_blob_name
-from shared.silver_contract import FORECAST_SCHEMA, FORECAST_TABLE, OBSERVATION_SCHEMA, OBSERVATION_TABLE
-from shared.silver_transform import transform_bronze
+from silver_rules import bronze_blob_name
+from silver_rules import FORECAST_SCHEMA, FORECAST_TABLE, OBSERVATION_SCHEMA, OBSERVATION_TABLE
+from silver_rules import transform_bronze
 
 
 UTC = timezone.utc

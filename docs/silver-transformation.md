@@ -1,9 +1,10 @@
 # Transformation Silver WeatherAPI
 
-`shared.silver_transform.transform_bronze(raw: bytes, source_blob: str)` transforme
+`transform_bronze(raw: bytes, source_blob: str)`, défini dans le notebook
+`databricks/notebooks/silver_rules.py`, transforme
 les octets exacts d'un seul JSON Bronze en deux tables Arrow, conformes aux
 schémas explicites de S1. Cette fonction est pure : elle ne lit aucun stockage,
-ne rappelle pas WeatherAPI et ne réalise aucune écriture Delta. S3 consomme son
+ne rappelle pas WeatherAPI et ne réalise aucune écriture Delta. Le notebook `silver_pipeline` consomme son
 `TransformResult` et assure les transactions/publications.
 
 ## Règles de données
@@ -81,17 +82,14 @@ manquante est informative : aucune heure ni aucun septième jour ne sont invent�
 
 ## Vérification
 
-Après installation des dépendances S1 et des dépendances de tests existantes :
-
 ```sh
-python -m pytest tests/test_silver_quality.py tests/test_silver_transform.py
+python -m pip install -r requirements-databricks.txt
+python -m pytest databricks/tests/test_rules_quality.py databricks/tests/test_rules_transform.py -o testpaths=databricks/tests
 ```
 
 Les cas synthétiques vérifient les valeurs/schémas Arrow, la provenance exacte,
 UTC/DST, les métriques nulles et invalides, les rejets partiels, les doublons,
 les conflits, l'échec total et la conservation des révisions entre ingestions.
-Le lot S2 comprend 75 cas : suite S2 passée localement sur Python 3.12 avec
-PyArrow 21.0.0 ; 242 tests passent avec les 167 tests Bronze existants.
 Les deux fixtures `*_derived_real.json` de S1 conservent les valeurs de vrais
 Bronze des 17 et 18 octobre 2026, avec seulement deux heures conservées par jour.
 Leurs fichiers de provenance distinguent le SHA original et le SHA des extraits.
@@ -112,5 +110,5 @@ coordonnées explicites pour les trois villes. Son champ additionnel
 pas la mesure des jours et heures réellement présents dans la réponse et ne
 change pas le traitement des archives historiques.
 
-Les tests unitaires n'établissent pas la compatibilité ADLS ni le chargement du
-paquet Azure Functions : leur acceptation relève de S1/S3 puis de S4 sur Azure.
+Les tests unitaires n'établissent pas l'accès ADLS depuis Databricks : son
+acceptation est la phase 4 de [l'ADR 0001](adr/0001-silver-databricks-serverless.md).

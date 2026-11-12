@@ -80,3 +80,8 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "application_insights_id" {
+  description = "Application Insights resource ID, kept as the portal's hidden-link tag"
+  type        = string
+}

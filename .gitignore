@@ -40,3 +40,6 @@ plan/
 .coverage
 htmlcov/
 coverage.xml
+
+# Silver notebooks deployed to Databricks by infra/databricks.tf
+!databricks/notebooks/
