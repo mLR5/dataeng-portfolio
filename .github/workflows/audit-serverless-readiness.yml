@@ -1,0 +1,270 @@
+name: Validate Databricks serverless readiness without deployment
+
+# Read-only preflight on an isolated branch. ARM validate is not a deployment.
+on:
+  push:
+    branches: [audit/databricks-serverless-readiness]
+    paths: ['.github/workflows/audit-serverless-readiness.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: audit-databricks-serverless-readiness
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: dev
+    steps:
+      - name: Azure login with OIDC
+        id: oidc
+        if: vars.AZURE_CLIENT_ID != ''
+        continue-on-error: true
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.TF_VAR_SUBSCRIPTION_ID }}
+      - name: Azure login with existing project identity
+        id: existing_identity
+        if: vars.AZURE_CLIENT_ID == ''
+        continue-on-error: true
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Validate minimal serverless template and read five blob metadata entries
+        if: always()
+        env:
+          PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
+          DEPLOYMENT_ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+          STORAGE_ACCOUNT_NAME: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+          OIDC_OUTCOME: ${{ steps.oidc.outcome }}
+          EXISTING_IDENTITY_OUTCOME: ${{ steps.existing_identity.outcome }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          API_VERSION = "2026-01-01"
+          LOCATION = "francecentral"
+          WORKSPACE_TYPE = "Microsoft.Databricks/workspaces"
+          report = {
+              "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+              "read_only": True,
+              "scope": "Existing project resource group; ARM validate and five Bronze blob metadata entries",
+              "requested_api_version": API_VERSION,
+              "requested_location": LOCATION,
+              "validation_operation": "az deployment group validate",
+              "validation_target_type": WORKSPACE_TYPE,
+              "resources_created": False,
+              "provider_registration_requested": False,
+              "keys_requested": False,
+              "blob_contents_requested": False,
+              "serverless_execution_tested": False,
+              "cost_measurement_performed": False,
+              "checks": {},
+              "blocked": [],
+          }
+
+          def blocked(label, code, target_type=None):
+              item = {"check": label, "code": code}
+              if target_type:
+                  item["target_type"] = target_type
+              report["blocked"].append(item)
+
+          def error_codes(text):
+              # Only bounded code tokens are retained; never persist CLI stderr.
+              patterns = (
+                  r"(?:^|\n)(?:ERROR:\s*)?\(([A-Za-z][A-Za-z0-9_.]{0,127})\)",
+                  r"(?:^|\n)\s*(?:Code|ErrorCode):\s*([A-Za-z][A-Za-z0-9_.]{0,127})",
+                  r'"code"\s*:\s*"([A-Za-z][A-Za-z0-9_.]{0,127})"',
+              )
+              found = []
+              for pattern in patterns:
+                  for code in re.findall(pattern, text):
+                      if code not in found:
+                          found.append(code)
+              return found[:10] or ["azure_cli_failed"]
+
+          def read(label, arguments, *, target_type=None):
+              try:
+                  result = subprocess.run(
+                      ["az", *arguments, "--only-show-errors", "--output", "json"],
+                      capture_output=True, text=True, timeout=180, check=False,
+                  )
+                  if result.returncode:
+                      for code in error_codes(result.stderr):
+                          blocked(label, code, target_type)
+                      return None
+                  return json.loads(result.stdout)
+              except subprocess.TimeoutExpired:
+                  code = "command_timeout"
+              except json.JSONDecodeError:
+                  code = "invalid_json_response"
+              except OSError:
+                  code = "command_unavailable"
+              blocked(label, code, target_type)
+              return None
+
+          project = os.environ.get("PROJECT_NAME", "")
+          environment = os.environ.get("DEPLOYMENT_ENVIRONMENT", "")
+          account = os.environ.get("STORAGE_ACCOUNT_NAME", "")
+          resource_group = f"rg-{project}-{environment}"
+          workspace_name = f"dbw-{project}-serverless-bench"
+          authenticated = "success" in (
+              os.environ.get("OIDC_OUTCOME"), os.environ.get("EXISTING_IDENTITY_OUTCOME"),
+          )
+          scope_valid = (
+              bool(project and environment)
+              and re.fullmatch(r"[A-Za-z0-9._()\-]{1,90}", resource_group)
+              and re.fullmatch(r"[A-Za-z0-9_-]{3,64}", workspace_name)
+          )
+          if not authenticated:
+              blocked("authentication", "azure_login_failed")
+          if not scope_valid:
+              blocked("configuration", "missing_or_invalid_project_scope")
+          if authenticated and scope_valid:
+              report["resource_group"] = resource_group
+              report["candidate_workspace_name"] = workspace_name
+              subscription = read("subscription", [
+                  "account", "show", "--query", "{id:id,state:state}",
+              ], target_type="Microsoft.Resources/subscriptions")
+              if subscription is not None:
+                  report["checks"]["subscription"] = subscription
+                  if subscription.get("state") != "Enabled":
+                      blocked("subscription", "subscription_not_enabled")
+              group = read("resource_group", [
+                  "group", "show", "--name", resource_group,
+                  "--query", "{id:id,name:name,location:location}",
+              ], target_type="Microsoft.Resources/resourceGroups")
+              if group is not None:
+                  report["checks"]["resource_group"] = group
+                  if group.get("location", "").lower() != LOCATION:
+                      blocked("resource_group", "existing_group_not_francecentral")
+              provider = read("databricks_provider", [
+                  "provider", "show", "--namespace", "Microsoft.Databricks",
+                  "--query", "{namespace:namespace,registration_state:registrationState,workspace_types:resourceTypes[?resourceType=='workspaces'].{type:resourceType,api_versions:apiVersions,locations:locations}}",
+              ], target_type=WORKSPACE_TYPE)
+              provider_ready = False
+              if provider is not None:
+                  types = provider.get("workspace_types") or []
+                  versions = {v for t in types for v in t.get("api_versions", [])}
+                  locations = {v.replace(" ", "").lower() for t in types for v in t.get("locations", [])}
+                  report["checks"]["databricks_provider"] = {
+                      "namespace": provider.get("namespace"),
+                      "registration_state": provider.get("registration_state"),
+                      "requested_api_supported": API_VERSION in versions,
+                      "requested_location_supported": LOCATION in locations,
+                  }
+                  if provider.get("registration_state") != "Registered":
+                      blocked("databricks_provider", "provider_not_registered_no_registration_attempted", WORKSPACE_TYPE)
+                  elif API_VERSION not in versions:
+                      blocked("databricks_provider", "requested_api_version_unavailable", WORKSPACE_TYPE)
+                  elif LOCATION not in locations:
+                      blocked("databricks_provider", "francecentral_not_advertised", WORKSPACE_TYPE)
+                  else:
+                      provider_ready = True
+              group_ready = group is not None and group.get("location", "").lower() == LOCATION
+              subscription_ready = subscription is not None and subscription.get("state") == "Enabled"
+              if provider_ready and group_ready and subscription_ready:
+                  template = {
+                      "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                      "contentVersion": "1.0.0.0",
+                      "resources": [{
+                          "type": WORKSPACE_TYPE,
+                          "apiVersion": API_VERSION,
+                          "name": workspace_name,
+                          "location": LOCATION,
+                          "sku": {"name": "premium"},
+                          "properties": {"computeMode": "Serverless"},
+                      }],
+                  }
+                  template_path = Path("serverless-validation-template.json")
+                  template_path.write_text(json.dumps(template), encoding="utf-8")
+                  validation = read("serverless_template_validation", [
+                      "deployment", "group", "validate", "--resource-group", resource_group,
+                      "--name", "audit-databricks-serverless-readiness",
+                      "--template-file", str(template_path), "--validation-level", "Provider",
+                  ], target_type=WORKSPACE_TYPE)
+                  if validation is not None:
+                      error = validation.get("error") if isinstance(validation, dict) else None
+                      if error:
+                          for code in error_codes(json.dumps(error)):
+                              blocked("serverless_template_validation", code, WORKSPACE_TYPE)
+                      else:
+                          report["checks"]["serverless_template_validation"] = {
+                              "passed": True,
+                              "target_type": WORKSPACE_TYPE,
+                              "api_version": API_VERSION,
+                              "compute_mode": "Serverless",
+                              "sku": "premium",
+                              "resources_created": False,
+                          }
+              else:
+                  blocked("serverless_template_validation", "prerequisite_not_ready", WORKSPACE_TYPE)
+              if re.fullmatch(r"[a-z0-9]{3,24}", account):
+                  metadata = read("bronze_metadata", [
+                      "storage", "blob", "list", "--account-name", account,
+                      "--container-name", "bronze", "--prefix", "weather/weatherapi/",
+                      "--auth-mode", "login", "--num-results", "5",
+                      "--query", "[].{name:name,size:properties.contentLength}",
+                  ], target_type="Microsoft.Storage/storageAccounts/blobServices/containers/blobs")
+                  if metadata is not None:
+                      if (not isinstance(metadata, list) or len(metadata) > 5
+                              or any(not isinstance(item, dict)
+                                     or not isinstance(item.get("name"), str)
+                                     or not item["name"].startswith("weather/weatherapi/")
+                                     or type(item.get("size")) is not int or item["size"] < 0
+                                     for item in metadata)):
+                          blocked("bronze_metadata", "unexpected_metadata_shape")
+                      else:
+                          report["checks"]["bronze_metadata"] = {
+                              "auth_mode": "login", "count": len(metadata),
+                              "objects": [{"name": item["name"], "size": item["size"]} for item in metadata],
+                              "contents_read": False,
+                          }
+              else:
+                  blocked("bronze_metadata", "missing_or_invalid_storage_account")
+
+          report["complete"] = not report["blocked"]
+          report["authorization_validation_passed"] = bool(
+              report["checks"].get("serverless_template_validation", {}).get("passed"),
+          )
+          report["creation_or_execution_authorized_by_this_report"] = False
+          Path("databricks-serverless-readiness.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+          summary = [
+              "## Databricks serverless: read-only readiness",
+              "",
+              "Existing resource-group metadata, ARM template validation and at most five Bronze names/sizes.",
+              "No workspace, managed resource group, VNet, IP, NAT, catalog or Access Connector was created.",
+              "No provider registration, role change, key lookup or blob-content read was requested.",
+              f"ARM serverless validation passed: {report['authorization_validation_passed']}.",
+              f"Successful checks: {len(report['checks'])}. Blocked checks: {len(report['blocked'])}.",
+              "A successful validation does not prove serverless execution, Unity Catalog access or a cost ceiling.",
+          ]
+          for item in report["blocked"]:
+              suffix = f" ({item['target_type']})" if item.get("target_type") else ""
+              summary.append(f"- `{item['check']}`: `{item['code']}`{suffix}")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
+              stream.write("\n".join(summary) + "\n")
+          print(f"Read-only serverless readiness: {len(report['checks'])} successful checks; {len(report['blocked'])} blocked checks.")
+          sys.exit(0 if report["complete"] else 1)
+          PY
+      - name: Preserve sanitized readiness report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: databricks-serverless-readiness
+          path: databricks-serverless-readiness.json
+          if-no-files-found: warn
+          retention-days: 14
