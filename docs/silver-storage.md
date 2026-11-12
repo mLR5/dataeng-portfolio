@@ -1,5 +1,9 @@
 # Silver Delta : stockage, publication et backfill
 
+> Runtime cible : Silver s'exécute sur Databricks serverless
+> ([ADR 0001](adr/0001-silver-databricks-serverless.md), [exploitation](silver-spark.md)).
+> Ce document reste la référence des garanties S3, que le job Spark reprend.
+
 Ce lot S3 dépend des contrats et bibliothèques S1 et du transformateur S2.
 Il ne déploie aucune ressource et ne modifie ni Bronze ni l’API météo.
 Les 64 tests S3 exécutés localement utilisent de **vraies transactions Delta**,

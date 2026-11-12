@@ -1,0 +1,120 @@
+name: Databricks Silver
+
+# Manual only. Prerequisite: infra applied with the GitHub variable
+# DATABRICKS_ENABLED=true, which creates the serverless workspace and the
+# Access Connector. Order: uc-plan, uc-apply, bundle-deploy, bundle-run.
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: What to do
+        type: choice
+        options: [uc-plan, uc-apply, bundle-deploy, bundle-run]
+        default: uc-plan
+      target:
+        description: Bundle target (production only after phase 4 passed)
+        type: choice
+        options: [validation, production]
+        default: validation
+
+permissions:
+  contents: read
+
+concurrency:
+  group: databricks-silver
+  cancel-in-progress: false
+
+jobs:
+  databricks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: dev
+    env:
+      TF_VAR_subscription_id: ${{ secrets.TF_VAR_SUBSCRIPTION_ID }}
+      TF_VAR_project_name: ${{ secrets.TF_VAR_PROJECT_NAME }}
+      TF_VAR_environment: ${{ secrets.TF_VAR_ENVIRONMENT }}
+      TF_VAR_location: ${{ secrets.TF_VAR_LOCATION }}
+      TF_VAR_storage_account_name: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+      TF_VAR_bronze_monitoring_enabled: ${{ vars.BRONZE_MONITORING_ENABLED || 'true' }}
+      TF_VAR_bronze_alert_action_group_ids: ${{ vars.BRONZE_ALERT_ACTION_GROUP_IDS || '[]' }}
+      TF_VAR_databricks_enabled: ${{ vars.DATABRICKS_ENABLED || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Expose the service principal to Terraform and the Databricks CLI
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          for key in clientId clientSecret tenantId; do
+            value=$(jq -r ".$key" <<<"$AZURE_CREDENTIALS")
+            echo "::add-mask::$value"
+          done
+          {
+            echo "ARM_CLIENT_ID=$(jq -r .clientId <<<"$AZURE_CREDENTIALS")"
+            echo "ARM_CLIENT_SECRET=$(jq -r .clientSecret <<<"$AZURE_CREDENTIALS")"
+            echo "ARM_TENANT_ID=$(jq -r .tenantId <<<"$AZURE_CREDENTIALS")"
+            echo "ARM_SUBSCRIPTION_ID=${{ secrets.TF_VAR_SUBSCRIPTION_ID }}"
+          } >> "$GITHUB_ENV"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Read the workspace created by infra/
+        working-directory: ./infra
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ secrets.TF_BACKEND_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_BACKEND_STORAGE_ACCOUNT }}"
+          url=$(terraform output -raw databricks_workspace_url)
+          if [ -z "$url" ]; then
+            echo "::error::No Databricks workspace: set DATABRICKS_ENABLED=true and apply infra first."
+            exit 1
+          fi
+          {
+            echo "DATABRICKS_HOST=$url"
+            echo "DATABRICKS_AZURE_RESOURCE_ID=$(terraform output -raw databricks_workspace_resource_id)"
+            echo "TF_VAR_workspace_url=$url"
+            echo "TF_VAR_workspace_resource_id=$(terraform output -raw databricks_workspace_resource_id)"
+            echo "TF_VAR_access_connector_id=$(terraform output -raw databricks_access_connector_id)"
+            echo "TF_VAR_job_principal=$ARM_CLIENT_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Unity Catalog storage credential, external locations and grants
+        if: startsWith(inputs.action, 'uc-')
+        working-directory: ./infra/databricks_uc
+        run: |
+          terraform init -input=false \
+            -backend-config="resource_group_name=${{ secrets.TF_BACKEND_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_BACKEND_STORAGE_ACCOUNT }}"
+          if [ "${{ inputs.action }}" = "uc-apply" ]; then
+            terraform apply -input=false -auto-approve
+          else
+            terraform plan -input=false
+          fi
+
+      - uses: actions/setup-python@v5
+        if: startsWith(inputs.action, 'bundle-')
+        with:
+          python-version: '3.11'
+
+      - uses: databricks/setup-cli@v0.299.2
+        if: startsWith(inputs.action, 'bundle-')
+
+      - name: Deploy the Silver job bundle
+        if: inputs.action == 'bundle-deploy'
+        run: |
+          python -m pip install build
+          databricks bundle validate -t "${{ inputs.target }}" --var="storage_account=$TF_VAR_storage_account_name"
+          databricks bundle deploy -t "${{ inputs.target }}" --var="storage_account=$TF_VAR_storage_account_name"
+
+      - name: Run the Silver job once and wait for it
+        if: inputs.action == 'bundle-run'
+        run: databricks bundle run -t "${{ inputs.target }}" --var="storage_account=$TF_VAR_storage_account_name" silver_weatherapi

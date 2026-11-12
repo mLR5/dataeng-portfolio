@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "~> 4.0"
     }
+    azapi = {
+      source  = "Azure/azapi"
+      version = "~> 2.0"
+    }
   }
 
   backend "azurerm" {
@@ -14,6 +18,11 @@ terraform {
 
 provider "azurerm" {
   features {}
+  subscription_id = var.subscription_id
+}
+
+# Only used by infra/databricks.tf, which is disabled by default.
+provider "azapi" {
   subscription_id = var.subscription_id
 }
 

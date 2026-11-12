@@ -1,0 +1,42 @@
+# Databricks bundle for the Silver job (ADR 0001). The workspace host comes from
+# DATABRICKS_HOST; the storage account is passed with --var at deploy time.
+bundle:
+  name: weather-silver
+
+include:
+  - resources/*.yml
+
+variables:
+  storage_account:
+    description: ADLS Gen2 account holding the bronze and datalake containers
+  silver_path:
+    description: Silver root inside the datalake container
+    default: silver/_validation/spark
+  schedule_status:
+    description: PAUSED during validation, UNPAUSED once phase 4 passed
+    default: PAUSED
+  failure_emails:
+    description: Addresses notified when a run fails
+    type: complex
+    default: []
+
+artifacts:
+  silver_wheel:
+    type: whl
+    build: python -m build --wheel --outdir dist .
+    path: .
+    # Serverless caches environments by wheel version: a new version per deploy.
+    dynamic_version: true
+
+targets:
+  # Phase 4: isolated root, schedule paused, runs triggered by hand.
+  validation:
+    default: true
+    mode: development
+
+  # Phase 5: definitive root of schema v1 / transform 1.0.0, daily at 02:00 UTC.
+  production:
+    mode: production
+    variables:
+      silver_path: silver/weatherapi/schema=v1/transform=1.0.0
+      schedule_status: UNPAUSED
