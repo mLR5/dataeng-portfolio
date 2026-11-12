@@ -104,7 +104,8 @@ module "function_app" {
   application_insights_key               = module.application_insights.instrumentation_key
   application_insights_connection_string = module.application_insights.connection_string
   # Same spelling as the value the portal writes, so the plan shows no tag change.
-  application_insights_id                = replace(module.application_insights.id, "/providers/Microsoft.Insights/", "/providers/microsoft.insights/")
+  # (No leading slash: Terraform reads a pattern wrapped in slashes as a regex.)
+  application_insights_id                = replace(module.application_insights.id, "providers/Microsoft.Insights/", "providers/microsoft.insights/")
 
   weatherapi_secret_uri = "${module.keyvault.vault_uri}secrets/weather-api-key"
   queue_name            = module.storage.queue_name
