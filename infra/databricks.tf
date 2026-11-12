@@ -10,7 +10,7 @@ variable "databricks_enabled" {
 }
 
 variable "databricks_silver_path" {
-  description = "Silver root inside the datalake container. Validation first, then silver/weatherapi/schema=v1/transform=1.0.0."
+  description = "Silver root inside the datalake container. Validation first, then silver/weatherapi."
   type        = string
   default     = "silver/_validation/spark"
 
@@ -199,6 +199,22 @@ resource "databricks_job" "silver" {
   }
 
   # No cluster block: notebook tasks run on serverless compute.
+  # Tasks are declared in task_key order, as the Jobs API returns them, otherwise
+  # every plan shows the two tasks swapping. Execution order comes from depends_on.
+  task {
+    task_key = "freshness"
+    depends_on {
+      task_key = "publish"
+    }
+
+    notebook_task {
+      notebook_path = databricks_notebook.silver["silver_freshness"].path
+      base_parameters = {
+        silver_root = local.silver_root
+      }
+    }
+  }
+
   task {
     task_key = "publish"
     # A failed run is safe to replay: publications make it idempotent.
@@ -209,20 +225,6 @@ resource "databricks_job" "silver" {
       notebook_path = databricks_notebook.silver["silver_publish"].path
       base_parameters = {
         bronze_root = local.bronze_root
-        silver_root = local.silver_root
-      }
-    }
-  }
-
-  task {
-    task_key = "freshness"
-    depends_on {
-      task_key = "publish"
-    }
-
-    notebook_task {
-      notebook_path = databricks_notebook.silver["silver_freshness"].path
-      base_parameters = {
         silver_root = local.silver_root
       }
     }

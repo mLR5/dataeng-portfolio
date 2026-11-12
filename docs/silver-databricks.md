@@ -73,7 +73,7 @@ Tout passe par *Deploy Infrastructure* (push sur `main` ou lancement manuel).
 | Variable GitHub | Défaut | Effet |
 | --- | --- | --- |
 | `DATABRICKS_ENABLED` | `true` (défaut des workflows) | `false` ne crée rien, ou supprime ce qui existe ; `true` crée workspace serverless, Access Connector, rôles, objets Unity Catalog, notebooks et job |
-| `DATABRICKS_SILVER_PATH` | `silver/_validation/spark` | Racine Silver dans `datalake` ; `silver/weatherapi/schema=v1/transform=1.0.0` en production |
+| `DATABRICKS_SILVER_PATH` | `silver/_validation/spark` | Racine Silver dans `datalake` ; `silver/weatherapi` en production |
 | `DATABRICKS_SCHEDULE_PAUSED` | `true` | `false` active le job tous les jours à 02 h UTC |
 | `DATABRICKS_ALERT_EMAILS` | `[]` | Liste JSON d'adresses notifiées en cas d'échec |
 
@@ -97,7 +97,7 @@ Databricks.
 
 ### Phase 5 : production
 
-`DATABRICKS_SILVER_PATH=silver/weatherapi/schema=v1/transform=1.0.0`,
+`DATABRICKS_SILVER_PATH=silver/weatherapi`,
 `DATABRICKS_SCHEDULE_PAUSED=false`, adresses d'alerte, puis *Deploy
 Infrastructure*. Après 7 jours verts, Silver devient la source de Gold ; la racine
 de validation peut être supprimée.
@@ -107,7 +107,8 @@ de validation peut être supprimée.
 - Relancer après une panne : relancer le job, sans rien effacer.
 - Bronze modifié sous un ID publié : la tâche échoue avec `PublicationConflict` ;
   enquêter, ne pas supprimer la publication.
-- Changer une règle de transformation : nouvelle `TRANSFORM_VERSION`, donc nouvelle
-  racine, jamais de modification en place.
+- Changer une règle de transformation : nouvelle `TRANSFORM_VERSION` et nouvelle
+  racine (par exemple `silver/weatherapi_v2`), jamais de modification en place :
+  les tables sont insert-only et refusent une ligne existante différente.
 - Modifier un notebook : commit sur `main` ; *Deploy Infrastructure* republie le
   notebook (Terraform compare son contenu).

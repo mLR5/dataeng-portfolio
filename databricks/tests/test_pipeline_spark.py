@@ -44,10 +44,10 @@ def test_unsafe_roots_are_refused(root):
         SilverPaths(root)
 
 
-def test_control_tables_live_under_the_version_root():
-    paths = SilverPaths("abfss://datalake@acct.dfs.core.windows.net/silver/weatherapi/schema=v1/transform=1.0.0/")
-    assert paths.table("publications").endswith("/transform=1.0.0/_control/publications")
-    assert paths.table(OBSERVATION_TABLE).endswith("/transform=1.0.0/observation_snapshots")
+def test_control_tables_live_under_the_silver_root():
+    paths = SilverPaths("abfss://datalake@acct.dfs.core.windows.net/silver/weatherapi/")
+    assert paths.table("publications").endswith("/silver/weatherapi/_control/publications")
+    assert paths.table(OBSERVATION_TABLE).endswith("/silver/weatherapi/observation_snapshots")
 
 
 def test_listing_extracts_canonical_identity_and_ignores_other_files(spark, tmp_path):
