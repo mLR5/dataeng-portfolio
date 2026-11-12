@@ -1,0 +1,65 @@
+name: Validate Bronze collection after the Databricks deployment
+
+# Read-only, on an isolated branch: lists today's Bronze archives, reads the status
+# of the latest ones and the Function App setting NAMES (never values).
+on:
+  push:
+    branches: [validation/bronze-after-databricks]
+    paths: ['.github/workflows/validate-bronze-after-databricks.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: dev
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Bronze archives collected today (UTC partitions)
+        env:
+          ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+        run: |
+          day=$(date -u +%Y/%m/%d)
+          echo "Now (UTC): $(date -u +%FT%TZ)"
+          az storage blob list --account-name "$ACCOUNT" --auth-mode key --only-show-errors \
+            --container-name bronze --prefix "weather/weatherapi/$day/" --num-results 200 \
+            --query "[].{name:name, size:properties.contentLength, modified:properties.lastModified}" -o table
+          az storage blob list --account-name "$ACCOUNT" --auth-mode key --only-show-errors \
+            --container-name bronze --prefix "weather/weatherapi/$day/" --num-results 200 \
+            --query "sort_by([], &properties.lastModified)[-4:].name" -o tsv > /tmp/latest.txt
+          mkdir -p /tmp/bronze
+          while read -r blob; do
+            az storage blob download --account-name "$ACCOUNT" --auth-mode key --only-show-errors \
+              --container-name bronze --name "$blob" --file "/tmp/bronze/$(basename "$blob")" -o none
+          done < /tmp/latest.txt
+          python3 - <<'PY'
+          import glob, json, os
+          for path in sorted(glob.glob("/tmp/bronze/*.json")):
+              data = json.load(open(path))
+              cities = [(c.get("city"), c.get("status")) for c in data.get("cities", [])]
+              print(os.path.basename(path), "| status:", data.get("status"),
+                    "| timestamp:", data.get("ingestion_timestamp"),
+                    "| summary:", data.get("summary"), "| cities:", cities)
+          PY
+      - name: Ingestion queues
+        env:
+          ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+        run: |
+          for q in $(az storage queue list --account-name "$ACCOUNT" --auth-mode key --only-show-errors --query "[].name" -o tsv); do
+            count=$(az storage message peek --account-name "$ACCOUNT" --auth-mode key --only-show-errors -q "$q" --num-messages 32 --query "length(@)" -o tsv)
+            echo "$q: $count visible message(s) (peek, max 32)"
+          done
+      - name: Function App setting names (values never printed)
+        env:
+          PROJECT: ${{ secrets.TF_VAR_PROJECT_NAME }}
+          ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+        run: |
+          az functionapp config appsettings list --only-show-errors \
+            -g "rg-$PROJECT-$ENVIRONMENT" -n "func-$PROJECT-$ENVIRONMENT" --query "sort_by([], &name)[].name" -o tsv
+          echo "--- function state and last state change"
+          az functionapp show --only-show-errors -g "rg-$PROJECT-$ENVIRONMENT" -n "func-$PROJECT-$ENVIRONMENT" \
+            --query "{state:state, lastModified:lastModifiedTimeUtc}" -o json
