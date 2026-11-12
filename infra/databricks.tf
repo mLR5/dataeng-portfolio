@@ -116,6 +116,16 @@ resource "azurerm_role_assignment" "databricks_datalake_contributor" {
   principal_id         = azurerm_databricks_access_connector.silver[0].identity[0].principal_id
 }
 
+# Unity Catalog reaches ADLS with user delegation SAS. Generating the delegation key
+# is a storage-account action that container-scoped data roles do not grant; this
+# role allows only that, no data access (the first job run failed without it).
+resource "azurerm_role_assignment" "databricks_blob_delegator" {
+  count                = local.databricks_count
+  scope                = module.storage.id
+  role_definition_name = "Storage Blob Delegator"
+  principal_id         = azurerm_databricks_access_connector.silver[0].identity[0].principal_id
+}
+
 # --- Unity Catalog ----------------------------------------------------------
 
 resource "databricks_storage_credential" "adls" {
@@ -138,7 +148,7 @@ resource "databricks_external_location" "bronze" {
   read_only       = true
   skip_validation = true
   comment         = "Bronze WeatherAPI archives written by the Function App"
-  depends_on      = [azurerm_role_assignment.databricks_bronze_reader]
+  depends_on      = [azurerm_role_assignment.databricks_bronze_reader, azurerm_role_assignment.databricks_blob_delegator]
 }
 
 resource "databricks_external_location" "silver" {
@@ -148,7 +158,7 @@ resource "databricks_external_location" "silver" {
   credential_name = databricks_storage_credential.adls[0].name
   skip_validation = true
   comment         = "Silver Delta tables and their _control tables, validation roots included"
-  depends_on      = [azurerm_role_assignment.databricks_datalake_contributor]
+  depends_on      = [azurerm_role_assignment.databricks_datalake_contributor, azurerm_role_assignment.databricks_blob_delegator]
 }
 
 resource "databricks_grants" "bronze" {
