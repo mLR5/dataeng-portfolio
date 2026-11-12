@@ -43,8 +43,9 @@ def bronze_blob_name(ingestion_id, ingestion_timestamp):
 # MAGIC
 # MAGIC Versioned, I/O-free contracts shared by Silver transformation and Delta storage.
 # MAGIC
-# MAGIC Changing produced values requires a new TRANSFORM_VERSION and a separate output
-# MAGIC root. Delta commit versions are storage versions, not transformation versions.
+# MAGIC Every row carries schema_version and transform_version. Changing produced values
+# MAGIC requires a new TRANSFORM_VERSION and a separate output root (the tables are
+# MAGIC insert-only). Delta commit versions are storage versions, not transformation versions.
 
 # COMMAND ----------
 

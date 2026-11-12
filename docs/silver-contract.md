@@ -136,8 +136,9 @@ total de lignes car un diagnostic peut concerner une section complète.
 
 ## Stockage et barrière de publication
 
-Deux racines Delta communes aux ingestions sous
-`datalake/silver/weatherapi/schema=v1/transform=1.0.0/`. Pas de partition
+Deux tables Delta communes aux ingestions sous `datalake/silver/weatherapi/`.
+Les versions de schéma et de transformation sont des colonnes de chaque ligne,
+pas des dossiers. Pas de partition
 physique initiale et pas de table Delta par ingestion. Ne jamais écrire dans
 les Parquet sous-jacents ni les lire par glob. Ne pas activer automatiquement
 l'évolution de schéma, le compactage ou `VACUUM`.

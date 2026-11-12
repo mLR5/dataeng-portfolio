@@ -111,7 +111,7 @@ _SAFE_ROOT = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:/{1,3}[^`'\s]+$|^/[^`'\s]+$")
 
 @dataclass(frozen=True)
 class SilverPaths:
-    """One root per schema/transform version; control tables live under _control."""
+    """One Silver root; control tables live under _control. Versions are row columns."""
     root: str
 
     def __post_init__(self):

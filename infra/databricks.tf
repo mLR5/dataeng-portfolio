@@ -10,7 +10,7 @@ variable "databricks_enabled" {
 }
 
 variable "databricks_silver_path" {
-  description = "Silver root inside the datalake container. Validation first, then silver/weatherapi/schema=v1/transform=1.0.0."
+  description = "Silver root inside the datalake container. Validation first, then silver/weatherapi."
   type        = string
   default     = "silver/_validation/spark"
 
