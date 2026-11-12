@@ -1,0 +1,162 @@
+name: Validate the Silver Databricks job (phase 4)
+
+# Isolated branch, phase 4 of ADR 0001: runs the deployed job twice on the
+# validation root, then reads the Delta tables directly in ADLS to check that
+# every canonical Bronze archive is published once and that a replay writes nothing.
+on:
+  push:
+    branches: [validation/silver-databricks-run]
+    paths: ['.github/workflows/validate-silver-databricks-run.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: silver-databricks-run
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: dev
+    env:
+      PROJECT: ${{ secrets.TF_VAR_PROJECT_NAME }}
+      ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+      ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+      SILVER_PATH: silver/_validation/spark
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Databricks authentication (deployment service principal)
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          for key in clientId clientSecret tenantId; do echo "::add-mask::$(jq -r ".$key" <<<"$AZURE_CREDENTIALS")"; done
+          ws=$(az resource show -g "rg-$PROJECT-$ENVIRONMENT" -n "dbw-$PROJECT-$ENVIRONMENT" \
+                --resource-type Microsoft.Databricks/workspaces --only-show-errors -o json)
+          key=$(az storage account keys list -n "$ACCOUNT" --only-show-errors --query "[0].value" -o tsv)
+          echo "::add-mask::$key"
+          {
+            echo "ARM_CLIENT_ID=$(jq -r .clientId <<<"$AZURE_CREDENTIALS")"
+            echo "ARM_CLIENT_SECRET=$(jq -r .clientSecret <<<"$AZURE_CREDENTIALS")"
+            echo "ARM_TENANT_ID=$(jq -r .tenantId <<<"$AZURE_CREDENTIALS")"
+            echo "DATABRICKS_HOST=https://$(jq -r .properties.workspaceUrl <<<"$ws")"
+            echo "DATABRICKS_AZURE_RESOURCE_ID=$(jq -r .id <<<"$ws")"
+            echo "STORAGE_KEY=$key"
+          } >> "$GITHUB_ENV"
+
+      - uses: databricks/setup-cli@v0.299.2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install the Delta reader
+        run: python -m pip install --quiet deltalake==1.2.1 pyarrow==21.0.0 azure-storage-blob
+
+      - name: Write the inspection script
+        run: |
+          cat > /tmp/inspect.py <<'PY'
+          """Read-only: canonical Bronze count, Silver tables, Delta versions. Prints counts only."""
+          import json, os, re, sys
+          from collections import Counter
+          from azure.storage.blob import BlobServiceClient
+          from deltalake import DeltaTable
+
+          account, key = os.environ["ACCOUNT"], os.environ["STORAGE_KEY"]
+          root = f"abfss://datalake@{account}.dfs.core.windows.net/{os.environ['SILVER_PATH']}"
+          options = {"account_name": account, "account_key": key}
+          canonical = re.compile(r"^weather/weatherapi/\d{4}/\d{2}/\d{2}/\d{2}/\d{8}_\d{6}(_[0-9a-f]{32})?_weather_data\.json$")
+          service = BlobServiceClient(f"https://{account}.blob.core.windows.net", credential=key)
+          names = [b.name for b in service.get_container_client("bronze").list_blobs(name_starts_with="weather/weatherapi/")]
+          bronze = {n.rsplit("/", 1)[1].removesuffix("_weather_data.json") for n in names if canonical.fullmatch(n)}
+          report = {"bronze_canonical": len(bronze), "bronze_listed": len(names)}
+          tables = {"observation_snapshots": "observation_snapshots", "forecast_hourly_snapshots": "forecast_hourly_snapshots",
+                    "publications": "_control/publications", "quarantine": "_control/quarantine"}
+          for name, sub in tables.items():
+              try:
+                  table = DeltaTable(f"{root}/{sub}", storage_options=options)
+              except Exception as error:
+                  report[name] = {"error": type(error).__name__}
+                  continue
+              data = table.to_pyarrow_table()
+              info = {"rows": data.num_rows, "version": table.version(),
+                      "properties": {k: v for k, v in table.metadata().configuration.items()}}
+              if name == "publications":
+                  ids = data.column("ingestion_id").to_pylist()
+                  info["distinct_ids"] = len(set(ids))
+                  info["statuses"] = dict(Counter(data.column("status").to_pylist()))
+                  info["missing_bronze"] = len(bronze - set(ids))
+                  info["unknown_ids"] = len(set(ids) - bronze)
+                  collected = [v for v in data.column("collected_at_utc").to_pylist() if v]
+                  info["collected_range"] = [str(min(collected)), str(max(collected))] if collected else None
+              if name == "quarantine":
+                  info["codes"] = dict(Counter(data.column("code").to_pylist()).most_common(8))
+              if name in ("observation_snapshots", "forecast_hourly_snapshots"):
+                  info["cities"] = dict(Counter(data.column("city_id").to_pylist()))
+              report[name] = info
+          print(json.dumps(report, indent=2, sort_keys=True, default=str))
+          json.dump(report, open(sys.argv[1], "w"), default=str)
+          PY
+
+      - name: Silver state before the runs
+        run: python /tmp/inspect.py /tmp/before.json
+
+      - name: Run the job (first run, whole Bronze history)
+        run: |
+          set +e
+          job=$(databricks jobs list --name silver-weatherapi -o json | jq -r '.[0].job_id')
+          echo "JOB_ID=$job" >> "$GITHUB_ENV"
+          run=$(databricks jobs run-now "$job" --timeout 90m -o json)
+          echo "$run" | jq '{run_id, state: .state, duration_s: ((.end_time - .start_time)/1000), tasks: [.tasks[] | {task_key, state: .state}]}'
+          echo "$run" | jq -r '.tasks[].run_id' > /tmp/tasks1.txt
+          echo "$run" | jq -e '.state.result_state == "SUCCESS"' > /dev/null || {
+            for t in $(cat /tmp/tasks1.txt); do
+              databricks jobs get-run-output "$t" -o json | jq '{error, error_trace: (.error_trace // "" | .[0:3000])}'
+            done
+            exit 1
+          }
+
+      - name: Silver state after the first run
+        run: python /tmp/inspect.py /tmp/after1.json
+
+      - name: Run the job again (replay must publish nothing)
+        run: |
+          run=$(databricks jobs run-now "$JOB_ID" --timeout 60m -o json)
+          echo "$run" | jq '{run_id, state: .state, duration_s: ((.end_time - .start_time)/1000), tasks: [.tasks[] | {task_key, state: .state}]}'
+          echo "$run" | jq -e '.state.result_state == "SUCCESS"' > /dev/null
+
+      - name: Silver state after the replay, and checks
+        run: |
+          python /tmp/inspect.py /tmp/after2.json
+          python - <<'PY'
+          import json
+          a, b = json.load(open("/tmp/after1.json")), json.load(open("/tmp/after2.json"))
+          pub = a["publications"]
+          checks = {
+              "every canonical Bronze archive published": pub["missing_bronze"] == 0,
+              "no unknown ingestion": pub["unknown_ids"] == 0,
+              "one publication per ingestion": pub["distinct_ids"] == pub["rows"],
+              "replay created no Delta version": all(a[t]["version"] == b[t]["version"] for t in
+                  ("observation_snapshots", "forecast_hourly_snapshots", "publications", "quarantine")),
+              "replay inserted no row": all(a[t]["rows"] == b[t]["rows"] for t in
+                  ("observation_snapshots", "forecast_hourly_snapshots", "publications", "quarantine")),
+          }
+          for name, ok in checks.items():
+              print(("PASS " if ok else "FAIL ") + name)
+          assert all(checks.values())
+          PY
+
+      - name: Cost so far (system.billing.usage, may lag a few hours)
+        if: always()
+        continue-on-error: true
+        run: |
+          wh=$(databricks warehouses list -o json | jq -r '.[0].id // empty')
+          if [ -z "$wh" ]; then echo "No SQL warehouse available: read the cost in the workspace later."; exit 0; fi
+          body=$(jq -n --arg wh "$wh" --arg job "$JOB_ID" '{warehouse_id: $wh, wait_timeout: "50s",
+            statement: "SELECT usage_date, sku_name, SUM(usage_quantity) AS dbu FROM system.billing.usage WHERE usage_metadata.job_id = :job GROUP BY ALL ORDER BY usage_date",
+            parameters: [{name: "job", value: $job}]}')
+          databricks api post /api/2.0/sql/statements --json "$body" | jq '{status: .status.state, error: .status.error.message, rows: .result.data_array}'
