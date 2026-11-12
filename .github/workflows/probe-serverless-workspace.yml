@@ -1,0 +1,52 @@
+name: Probe temporary serverless workspace identity without compute
+
+on:
+  push:
+    branches: [probe/databricks-serverless]
+    paths:
+      - '.github/workflows/probe-serverless-workspace.yml'
+      - '.github/scripts/probe_serverless_workspace.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: databricks-serverless-identity-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Azure login with OIDC
+        if: vars.AZURE_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.TF_VAR_SUBSCRIPTION_ID }}
+      - name: Azure login with the existing project identity
+        if: vars.AZURE_CLIENT_ID == ''
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Probe and remove the temporary true-serverless workspace
+        env:
+          PROJECT_NAME: ${{ secrets.TF_VAR_PROJECT_NAME }}
+          DEPLOYMENT_ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+        run: python .github/scripts/probe_serverless_workspace.py --execute-probe --output serverless-workspace-probe.json
+      - name: Preserve identity and cleanup results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serverless-workspace-probe
+          path: serverless-workspace-probe.json
+          if-no-files-found: warn
+          retention-days: 7
