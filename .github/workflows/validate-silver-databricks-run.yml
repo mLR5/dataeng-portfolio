@@ -35,6 +35,8 @@ jobs:
           AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
         run: |
           for key in clientId clientSecret tenantId; do echo "::add-mask::$(jq -r ".$key" <<<"$AZURE_CREDENTIALS")"; done
+          # The subscription ID is kept secret in this repository: mask it before any output.
+          echo "::add-mask::$(az account show --query id -o tsv)"
           ws=$(az resource show -g "rg-$PROJECT-$ENVIRONMENT" -n "dbw-$PROJECT-$ENVIRONMENT" \
                 --resource-type Microsoft.Databricks/workspaces --only-show-errors -o json)
           key=$(az storage account keys list -n "$ACCOUNT" --only-show-errors --query "[0].value" -o tsv)
@@ -59,7 +61,7 @@ jobs:
 
       - name: Write the inspection script
         run: |
-          cat > /tmp/inspect.py <<'PY'
+          cat > /tmp/silver_inspect.py <<'PY'
           """Read-only: canonical Bronze count, Silver tables, Delta versions. Prints counts only."""
           import json, os, re, sys
           from collections import Counter
@@ -103,7 +105,7 @@ jobs:
           PY
 
       - name: Silver state before the runs
-        run: python /tmp/inspect.py /tmp/before.json
+        run: python /tmp/silver_inspect.py /tmp/before.json
 
       - name: Run the job (first run, whole Bronze history)
         run: |
@@ -121,7 +123,7 @@ jobs:
           }
 
       - name: Silver state after the first run
-        run: python /tmp/inspect.py /tmp/after1.json
+        run: python /tmp/silver_inspect.py /tmp/after1.json
 
       - name: Run the job again (replay must publish nothing)
         run: |
@@ -131,7 +133,7 @@ jobs:
 
       - name: Silver state after the replay, and checks
         run: |
-          python /tmp/inspect.py /tmp/after2.json
+          python /tmp/silver_inspect.py /tmp/after2.json
           python - <<'PY'
           import json
           a, b = json.load(open("/tmp/after1.json")), json.load(open("/tmp/after2.json"))
