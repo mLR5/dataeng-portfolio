@@ -1,24 +1,12 @@
 """Immutable control objects and the Gold publication barrier."""
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 
+from .silver_checks import PublicationConflict, json_bytes, quarantine_records
 from .silver_contract import SCHEMA_VERSION, SOURCE, TRANSFORM_VERSION, TABLE_SCHEMAS
-
-
-class PublicationConflict(ValueError):
-    """Published immutable identity or content does not match this ingestion."""
-
-
-def json_bytes(value):
-    def encode(item):
-        if isinstance(item, (date, datetime)):
-            return item.isoformat()
-        raise TypeError('Non JSON-safe publication value')
-    return json.dumps(value, sort_keys=True, separators=(',', ':'),
-                      ensure_ascii=False, allow_nan=False, default=encode).encode('utf-8')
 
 
 class AzureControlStore:
@@ -80,10 +68,7 @@ def read_publication(store, ingestion_id, source_blob, source_sha256, table_path
 
 
 def build_publication(result, ingestion_id, commits):
-    rejections = [{
-        'ingestion_id': ingestion_id, 'source_blob': result.source_blob,
-        'source_sha256': result.source_sha256, **r.to_dict(),
-    } for r in result.rejections]
+    rejections = quarantine_records(result, ingestion_id)
     quarantine = b''.join(json_bytes(r) + b'\n' for r in rejections)
     publication = {
         'complete': True, 'schema_version': SCHEMA_VERSION,

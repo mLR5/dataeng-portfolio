@@ -1,0 +1,5 @@
+# Local and CI tests of the Databricks Silver job. Databricks provides its own
+# Spark and Delta at runtime; keep these aligned with the serverless environment.
+pyspark==4.0.5
+delta-spark==4.0.1
+build>=1.2

@@ -4,15 +4,15 @@ import hashlib
 import re
 
 from . import config
-from .claim_check import INGESTION_ID_PATTERN
-from .silver_contract import SCHEMA_VERSION, TRANSFORM_VERSION, TABLE_SCHEMAS, SILVER_STATUSES
+from .silver_checks import bronze_identity, validate_transform_result
+from .silver_contract import SCHEMA_VERSION, TRANSFORM_VERSION, TABLE_SCHEMAS
 from .silver_lease import LeaseBusy
 from .silver_publication import (
-    PublicationConflict, build_publication, json_bytes,
-    publication_name, read_publication,
+    build_publication, json_bytes, publication_name, read_publication,
 )
 
-_PATH = re.compile(r'^weather/weatherapi/\d{4}/\d{2}/\d{2}/\d{2}/([^/]+)_weather_data\.json$')
+__all__ = ['ProcessResult', 'SilverRunner', 'adls_table_root', 'bronze_identity',
+           'make_azure_runner', 'silver_root']
 
 
 @dataclass(frozen=True)
@@ -24,13 +24,6 @@ class ProcessResult:
     def to_dict(self):
         return {'outcome': self.outcome, 'ingestion_id': self.ingestion_id,
                 'status': self.publication['status'] if self.publication else None}
-
-
-def bronze_identity(source_blob):
-    match = _PATH.fullmatch(source_blob)
-    if not match or not INGESTION_ID_PATTERN.fullmatch(match.group(1)):
-        raise ValueError('Expected a canonical Bronze blob path')
-    return match.group(1)
 
 
 def silver_root():
@@ -70,29 +63,8 @@ class SilverRunner:
         if previous:
             return ProcessResult('already_processed', ingestion_id, previous)
         result = self.transform(raw, source_blob)
-        if result.source_blob != source_blob or result.source_sha256 != source_hash:
-            raise PublicationConflict('Transformation provenance differs from Bronze')
-        terminal_empty = result.status == 'rejected' and not any(t.num_rows for t in result.tables.values())
-        if result.ingestion_id not in (None, ingestion_id) and not terminal_empty:
-            raise PublicationConflict('Transformation identity differs from Bronze path')
-        if result.status not in SILVER_STATUSES:
-            raise PublicationConflict('Unknown transformation status')
-        has_rows = any(t.num_rows for t in result.tables.values())
-        if (result.status in ('success', 'partial')) != has_rows:
-            raise PublicationConflict('Transformation status differs from row counts')
-        if result.status == 'empty' and not result.summary.get('reason'):
-            raise PublicationConflict('Empty transformation requires a collection reason')
-        if result.ingestion_id is None and not terminal_empty:
-            raise PublicationConflict('Only rejected empty results may lack identity')
-        for rows in result.tables.values():
-            for row in rows.to_pylist():
-                expected = {
-                    'ingestion_id': ingestion_id, 'source_blob': source_blob,
-                    'source_sha256': source_hash, 'schema_version': SCHEMA_VERSION,
-                    'transform_version': TRANSFORM_VERSION,
-                }
-                if any(row.get(k) != v for k, v in expected.items()):
-                    raise PublicationConflict('Row provenance differs from transformation')
+        validate_transform_result(result, ingestion_id=ingestion_id,
+                                  source_blob=source_blob, source_sha256=source_hash)
         try:
             with self.lease_factory() as lease:
                 lease.assert_held()
