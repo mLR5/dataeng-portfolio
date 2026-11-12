@@ -26,6 +26,9 @@ import uuid
 ARM = "https://management.azure.com"
 ARM_API = "2026-01-01"
 ARM_AUDIENCE = "https://management.azure.com/"
+# The workspace SP bridge validates a different management token audience.
+# Never send this legacy service-management token as ARM request authorization.
+DATABRICKS_MANAGEMENT_AUDIENCE = "https://management.core.windows.net/"
 DATABRICKS_AUDIENCE = "2ff814a6-3304-4ab8-85cb-cd0e6f879c1d"
 PURPOSE = "serverless-cost-probe"
 MAX_BODY = 1024 * 1024
@@ -48,6 +51,9 @@ class Response:
     status: int
     document: dict
     retry_after: float = 0
+    body_format: str = "json_object"
+    invalid_host_hint: bool = False
+    workspace_routing_hint: bool = False
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -64,6 +70,32 @@ def _document(raw):
     except (ValueError, UnicodeDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _body_metadata(raw):
+    """Classify a response without retaining or emitting its contents."""
+    if not raw.strip():
+        return {"body_format": "empty"}
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return {"body_format": "invalid_utf8"}
+    lowered = text.strip().lower()
+    try:
+        document = json.loads(text)
+        kind = "json_object" if isinstance(document, dict) else "json_other"
+    except ValueError:
+        kind = "html" if (lowered.startswith(("<!doctype html", "<html", "<head", "<body"))
+                               or "<html" in lowered[:512]) else "text"
+    return {
+        "body_format": kind,
+        "invalid_host_hint": any(value in lowered for value in (
+            "invalid host", "invalidhost", "unknown host", "hostname is invalid", "host header",
+        )),
+        "workspace_routing_hint": any(value in lowered for value in (
+            "workspace_id", "workspace id", "workspace-id",
+        )),
+    }
 
 
 class Http:
@@ -90,11 +122,14 @@ class Http:
                 content = result.read(MAX_BODY + 1)
                 if len(content) > MAX_BODY:
                     raise ProbeError("http", "response_too_large", result.status)
-                return Response(result.status, _document(content), self._retry_after(result.headers))
+                return Response(result.status, _document(content), self._retry_after(result.headers),
+                                **_body_metadata(content))
         except urllib.error.HTTPError as error:
             with error:
                 content = error.read(MAX_BODY + 1)
-            return Response(error.code, _document(content[:MAX_BODY]), self._retry_after(error.headers))
+            content = content[:MAX_BODY]
+            return Response(error.code, _document(content), self._retry_after(error.headers),
+                            **_body_metadata(content))
         except (urllib.error.URLError, TimeoutError, OSError):
             raise ProbeError("http", "request_failed") from None
 
@@ -187,15 +222,29 @@ def _status_label(status):
 
 def _api_error(response):
     """Retain a few diagnostic categories, never arbitrary response strings."""
-    code = response.document.get("error_code")
+    error = response.document.get("error")
+    candidates = [response.document.get("error_code"), response.document.get("errorCode")]
+    if isinstance(error, str):
+        candidates.append(error)
+    elif isinstance(error, dict):
+        candidates.extend(error.get(key) for key in ("error_code", "errorCode", "code"))
     known = {"INVALID_PARAMETER_VALUE", "BAD_REQUEST", "PERMISSION_DENIED", "UNAUTHENTICATED",
              "UNAUTHORIZED", "RESOURCE_DOES_NOT_EXIST", "INVALID_STATE", "INTERNAL_ERROR",
-             "TEMPORARILY_UNAVAILABLE", "FEATURE_DISABLED"}
+             "TEMPORARILY_UNAVAILABLE", "FEATURE_DISABLED", "INVALID_HOST", "INVALID_AUTHENTICATION",
+             "invalid_request", "invalid_token", "access_denied", "unauthorized_client", "invalid_client",
+             "unsupported_grant_type", "invalid_scope", "InvalidAuthenticationTokenAudience",
+             "AuthenticationFailed", "InvalidAccessToken", "Forbidden"}
+    code = next((item for item in candidates if isinstance(item, str) and item in known), "unclassified_error")
     text = " ".join(str(response.document.get(k, "")) for k in ("message", "detail", "error")).lower()
     return {
         "http_status": response.status,
-        "error_code": code if isinstance(code, str) and code in known else "unclassified_error",
-        "workspace_routing_hint": any(k in text for k in ("workspace_id", "workspace id", "workspace-id")),
+        "error_code": code,
+        "body_format": response.body_format,
+        "body_empty": response.body_format == "empty",
+        "html_response": response.body_format == "html",
+        "invalid_host_hint": response.invalid_host_hint,
+        "workspace_routing_hint": response.workspace_routing_hint or any(
+            k in text for k in ("workspace_id", "workspace id", "workspace-id")),
         "oauth_requirement_hint": "oauth" in text and any(k in text for k in ("required", "only", "unsupported")),
         "principal_assignment_hint": "principal" in text and any(k in text for k in ("not found", "not assigned", "does not exist")),
     }
@@ -300,18 +349,36 @@ class WorkspaceProbe:
             raise ProbeError("workspace", "workspace_routing_id_missing")
         headers = {
             "Authorization": "Bearer " + self.cli.token(DATABRICKS_AUDIENCE),
-            "X-Databricks-Azure-SP-Management-Token": self.cli.token(ARM_AUDIENCE),
+            "X-Databricks-Azure-SP-Management-Token": self.cli.token(DATABRICKS_MANAGEMENT_AUDIENCE),
             "X-Databricks-Azure-Workspace-Resource-Id": self.resource_id,
             "X-Databricks-Workspace-Id": workspace_id,
         }
-        identity = self.http.request("GET", host + "/api/2.0/preview/scim/v2/Me", headers=headers)
+        # ARM success can precede dataplane routing readiness. Retry reads once
+        # on 400/transient statuses, with a shared 90s budget and cleanup reserve.
+        # Never change tokens/roles or treat a retry as proof of access.
+        readiness_deadline = min(self.clock() + 90, self.overall_deadline - CLEANUP_TIMEOUT)
+        readiness_retries = 0
+
+        def read(path):
+            nonlocal readiness_retries
+            response = self.http.request("GET", host + path, headers=headers)
+            if (response.status in {400, 408, 429, 500, 502, 503, 504}
+                    and self.clock() < readiness_deadline):
+                delay = min(max(15, response.retry_after), max(0, readiness_deadline - self.clock()))
+                self.sleep(delay)
+                if self.clock() < readiness_deadline:
+                    readiness_retries += 1
+                    response = self.http.request("GET", host + path, headers=headers)
+            return response
+
+        identity = read("/api/2.0/preview/scim/v2/Me")
         details = {"identity_access": _status_label(identity.status), "identity_http_status": identity.status,
                    "account_admin": "not_verified", "workspace_routing_id_supplied": True}
         report["databricks"] = details
         if identity.status != 200:
             details["identity_error"] = _api_error(identity)
-        jobs = self.http.request("GET", host + "/api/2.1/jobs/list?limit=1", headers=headers)
-        status = self.http.request("GET", host + "/api/2.0/workspace/get-status?path=/", headers=headers)
+        jobs = read("/api/2.1/jobs/list?limit=1")
+        status = read("/api/2.0/workspace/get-status?path=/")
         details["jobs_metadata_http_status"] = jobs.status
         details["workspace_root_http_status"] = status.status
         if jobs.status != 200:
@@ -322,17 +389,19 @@ class WorkspaceProbe:
             isinstance(group, dict) and group.get("display") == "admins"
             for group in identity.document.get("groups", [])
         )
-        metastore = self.http.request("GET", host + "/api/2.1/unity-catalog/metastore_summary", headers=headers)
+        metastore = read("/api/2.1/unity-catalog/metastore_summary")
         details["metastore_access"] = _status_label(metastore.status)
         details["metastore_http_status"] = metastore.status
         details["metastore_assigned"] = bool(
             metastore.status == 200 and metastore.document.get("metastore_id")
         )
-        credentials = self.http.request(
-            "GET", host + "/api/2.1/unity-catalog/credentials?max_results=10", headers=headers,
-        )
+        if metastore.status != 200:
+            details["metastore_error"] = _api_error(metastore)
+        credentials = read("/api/2.1/unity-catalog/credentials?max_results=10")
         details["credential_listing_access"] = _status_label(credentials.status)
         details["credential_listing_http_status"] = credentials.status
+        if credentials.status != 200:
+            details["credential_listing_error"] = _api_error(credentials)
         if credentials.status == 200:
             items = credentials.document.get("credentials", [])
             if isinstance(items, list):
@@ -346,6 +415,7 @@ class WorkspaceProbe:
         details["storage_data_access_tested"] = False
         details["service_credential_access_tested"] = False
         details["compute_started"] = False
+        details["readiness_retries"] = readiness_retries
         if not any(r.status == 200 for r in (identity, jobs, status, metastore, credentials)):
             raise ProbeError("databricks_auth", "workspace_api_access_not_established", identity.status)
         details["authenticated_read_api_verified"] = True
