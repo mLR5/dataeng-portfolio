@@ -32,7 +32,14 @@ def done(stdout="", returncode=0, stderr=""):
     return subprocess.CompletedProcess([], returncode, stdout=stdout, stderr=stderr)
 
 
-def fake_runner(*, serverless_ok=False, no_rbac_ok=False, classic_ok=True, permissions=None):
+BLOB_AUTH_FAILURE = (
+    "ERROR: \nYou do not have the required permissions needed to perform this operation.\n"
+    "Depending on your operation, you may need to be assigned one of the following roles:\n"
+)
+
+
+def fake_runner(*, serverless_ok=False, no_rbac_ok=False, classic_ok=True, permissions=None,
+                blob_ok=True, data_actions=()):
     perms = permissions if permissions is not None else [{"actions": ["*"], "notActions": [
         "Microsoft.Authorization/*/Delete", "Microsoft.Authorization/*/Write"]}]
 
@@ -48,6 +55,8 @@ def fake_runner(*, serverless_ok=False, no_rbac_ok=False, classic_ok=True, permi
             return done(json.dumps({"state": "Registered", "types": [
                 {"v": ["2026-01-01", "2025-10-01-preview"], "l": ["France Central", "West Europe"]}]}))
         if args[:1] == ["rest"]:
+            if "storageAccounts" in joined:
+                return done(json.dumps({"value": [*perms, {"actions": [], "dataActions": list(data_actions)}]}))
             return done(json.dumps({"value": perms}))
         if args[:3] == ["policy", "assignment", "list"]:
             return done(json.dumps([{"name": "Allowed locations for rg-weatherproj-dev", "mode": "Default"}]))
@@ -58,6 +67,8 @@ def fake_runner(*, serverless_ok=False, no_rbac_ok=False, classic_ok=True, permi
             ok = classic_ok if mode == "Hybrid" else (no_rbac_ok if level == "ProviderNoRbac" else serverless_ok)
             return done(json.dumps({"properties": {}})) if ok else done(returncode=1, stderr=ARM_FAILURE)
         if args[:3] == ["storage", "blob", "list"]:
+            if not blob_ok:
+                return done(returncode=1, stderr=BLOB_AUTH_FAILURE)
             return done(json.dumps([{"size": 1200}, {"size": 1300}]))
         raise AssertionError(f"unexpected az call: {joined}")
 
@@ -132,3 +143,27 @@ def test_no_azure_call_without_authentication(tmp_path, outcome):
 
     report = audit_mod.Audit(env, runner=forbidden, workdir=tmp_path).run()
     assert report["blocked"] == [{"check": "authentication", "code": "azure_login_failed"}]
+
+
+def test_contributor_wildcard_does_not_grant_blob_data_read():
+    perms = [{"actions": ["*"], "notActions": [], "dataActions": []}]
+    assert not audit_mod.action_allowed(audit_mod.BLOB_READ_DATA_ACTION, perms, data=True)
+    reader = [{"dataActions": ["Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read"]}]
+    assert audit_mod.action_allowed(audit_mod.BLOB_READ_DATA_ACTION, reader, data=True)
+
+
+def test_second_run_shape_is_a_finding_not_a_blocker(tmp_path):
+    report = run_audit(tmp_path, serverless_ok=True, no_rbac_ok=True, blob_ok=False)
+    assert report["blocked"] == []
+    assert report["complete"] is True
+    assert report["diagnostics"]["storage_data_permissions"] == {"read": True, "blob_read_data_action": False}
+    finding = report["findings"][0]
+    assert finding["code"] == "deployment_identity_lacks_blob_data_read"
+    assert finding["messages"][0].startswith("You do not have the required permissions")
+
+
+def test_blob_failure_with_data_role_stays_blocking(tmp_path):
+    report = run_audit(tmp_path, serverless_ok=True, no_rbac_ok=True, blob_ok=False,
+                       data_actions=[audit_mod.BLOB_READ_DATA_ACTION])
+    assert [b["check"] for b in report["blocked"]] == ["bronze_metadata"]
+    assert report["findings"] == []

@@ -19,6 +19,7 @@ from typing import Callable
 API_VERSION = "2026-01-01"
 LOCATION = "francecentral"
 WORKSPACE_TYPE = "Microsoft.Databricks/workspaces"
+BLOB_READ_DATA_ACTION = "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read"
 REQUIRED_ACTIONS = (
     "Microsoft.Resources/deployments/validate/action",
     "Microsoft.Resources/deployments/write",
@@ -81,18 +82,26 @@ def error_messages(text: str, sensitive: tuple[str, ...]) -> list[str]:
             if message and message not in found:
                 found.append(message)
     if not found:
-        first = next((line for line in text.splitlines() if line.strip()), "")
-        if first:
-            found.append(sanitize(first, sensitive))
+        # Azure CLI often prints "ERROR:" alone, with the reason on the next line.
+        for line in text.splitlines():
+            line = re.sub(r"^\s*ERROR:\s*", "", line).strip()
+            if re.search(r"[A-Za-z]{3}", line):
+                found.append(sanitize(line, sensitive))
+                break
     return found[:5]
 
 
-def action_allowed(action: str, permissions: list[dict]) -> bool:
-    """Evaluate ARM effective permissions (actions minus notActions)."""
+def action_allowed(action: str, permissions: list[dict], *, data: bool = False) -> bool:
+    """Evaluate ARM effective permissions (actions minus notActions).
+
+    ``data=True`` evaluates data-plane permissions (dataActions), which
+    control-plane wildcards such as Contributor's ``*`` never grant.
+    """
+    grant, revoke = ("dataActions", "notDataActions") if data else ("actions", "notActions")
     action = action.lower()
     for entry in permissions:
-        allowed = any(fnmatch.fnmatchcase(action, p.lower()) for p in entry.get("actions", []))
-        denied = any(fnmatch.fnmatchcase(action, p.lower()) for p in entry.get("notActions", []))
+        allowed = any(fnmatch.fnmatchcase(action, p.lower()) for p in entry.get(grant, []))
+        denied = any(fnmatch.fnmatchcase(action, p.lower()) for p in entry.get(revoke, []))
         if allowed and not denied:
             return True
     return False
@@ -144,6 +153,7 @@ class Audit:
             "requested_location": LOCATION,
             "checks": {},
             "diagnostics": {},
+            "findings": [],
             "blocked": [],
         }
 
@@ -246,6 +256,24 @@ class Audit:
             "allowed": {action: action_allowed(action, permissions) for action in REQUIRED_ACTIONS},
         }
 
+    def storage_data_permissions(self, subscription_id: str) -> None:
+        if not re.fullmatch(r"[a-z0-9]{3,24}", self.account):
+            return
+        url = (
+            f"https://management.azure.com/subscriptions/{subscription_id}/resourceGroups/"
+            f"{self.resource_group}/providers/Microsoft.Storage/storageAccounts/{self.account}"
+            "/providers/Microsoft.Authorization/permissions?api-version=2022-04-01"
+        )
+        value, failure = self.call(["rest", "--method", "get", "--url", url])
+        if failure:
+            self.report["diagnostics"]["storage_data_permissions"] = {"read": False, "codes": failure["codes"]}
+            return
+        permissions = (value or {}).get("value", []) if isinstance(value, dict) else []
+        self.report["diagnostics"]["storage_data_permissions"] = {
+            "read": True,
+            "blob_read_data_action": action_allowed(BLOB_READ_DATA_ACTION, permissions, data=True),
+        }
+
     def policy_assignments(self) -> None:
         value, failure = self.call([
             "policy", "assignment", "list", "--resource-group", self.resource_group,
@@ -301,6 +329,17 @@ class Audit:
             "--query", "[].{size:properties.contentLength}",
         ])
         if failure:
+            data = self.report["diagnostics"].get("storage_data_permissions") or {}
+            if data.get("read") and data.get("blob_read_data_action") is False:
+                # Expected for this deployment identity: it is Contributor (control plane)
+                # without a Storage Blob Data role. Databricks will read Bronze through its
+                # own Access Connector identity, which needs its own data role.
+                self.report["findings"].append({
+                    "check": "bronze_metadata",
+                    "code": "deployment_identity_lacks_blob_data_read",
+                    "messages": failure["messages"],
+                })
+                return
             self.blocked("bronze_metadata", failure["codes"][0], failure["messages"])
             return
         sizes = [i.get("size") for i in value or [] if isinstance(i, dict)]
@@ -323,6 +362,7 @@ class Audit:
             provider_ok = self.provider_ready()
             if subscription_id:
                 self.effective_permissions(subscription_id)
+                self.storage_data_permissions(subscription_id)
             self.policy_assignments()
             if subscription_id and group_ok and provider_ok:
                 self.validate_templates(subscription_id)
@@ -364,6 +404,8 @@ def summary_lines(report: dict) -> list[str]:
         lines.append(f"- validate `{name}`: {state}")
         for message in result.get("messages", []):
             lines.append(f"  - {message}")
+    for item in report.get("findings", []):
+        lines.append(f"- finding `{item['check']}`: `{item['code']}` (not blocking serverless readiness)")
     for item in report["blocked"]:
         lines.append(f"- blocked `{item['check']}`: `{item['code']}`")
     return lines
