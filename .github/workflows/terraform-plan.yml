@@ -67,7 +67,7 @@ jobs:
         TF_VAR_storage_account_name: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
         TF_VAR_bronze_monitoring_enabled: ${{ vars.BRONZE_MONITORING_ENABLED || 'true' }}
         TF_VAR_bronze_alert_action_group_ids: ${{ vars.BRONZE_ALERT_ACTION_GROUP_IDS || '[]' }}
-        TF_VAR_databricks_enabled: ${{ vars.DATABRICKS_ENABLED || 'false' }}
+        TF_VAR_databricks_enabled: ${{ vars.DATABRICKS_ENABLED || 'true' }}
         TF_VAR_databricks_silver_path: ${{ vars.DATABRICKS_SILVER_PATH || 'silver/_validation/spark' }}
         TF_VAR_databricks_schedule_paused: ${{ vars.DATABRICKS_SCHEDULE_PAUSED || 'true' }}
         TF_VAR_databricks_alert_emails: ${{ vars.DATABRICKS_ALERT_EMAILS || '[]' }}

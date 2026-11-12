@@ -72,7 +72,7 @@ Tout passe par *Deploy Infrastructure* (push sur `main` ou lancement manuel).
 
 | Variable GitHub | Défaut | Effet |
 | --- | --- | --- |
-| `DATABRICKS_ENABLED` | `false` | `true` crée workspace serverless, Access Connector, rôles, objets Unity Catalog, notebooks et job |
+| `DATABRICKS_ENABLED` | `true` (défaut des workflows) | `false` ne crée rien, ou supprime ce qui existe ; `true` crée workspace serverless, Access Connector, rôles, objets Unity Catalog, notebooks et job |
 | `DATABRICKS_SILVER_PATH` | `silver/_validation/spark` | Racine Silver dans `datalake` ; `silver/weatherapi/schema=v1/transform=1.0.0` en production |
 | `DATABRICKS_SCHEDULE_PAUSED` | `true` | `false` active le job tous les jours à 02 h UTC |
 | `DATABRICKS_ALERT_EMAILS` | `[]` | Liste JSON d'adresses notifiées en cas d'échec |
@@ -82,7 +82,7 @@ Le provider Databricks utilise le même principal de service que `azure/login`
 
 ### Phase 4 : validation
 
-1. `DATABRICKS_ENABLED=true`, puis relancer *Deploy Infrastructure*.
+1. Databricks est activé par défaut dans les workflows : le merge sur `main` déploie tout.
 2. Dans le workspace, lancer le job `silver-weatherapi` à la main (ou le notebook
    `silver_publish` avec ses widgets). Il traite tout l'historique Bronze vers
    `silver/_validation/spark`.
