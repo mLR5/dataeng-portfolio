@@ -69,5 +69,15 @@ resource "azurerm_function_app_flex_consumption" "this" {
     "hidden-link: /app-insights-resource-id" = var.application_insights_id
   })
 
+  # Flex Consumption keeps these outside the values the provider reads back, so every
+  # plan showed them changing although Azure is correct (checked on 2026-11-12:
+  # AzureWebJobsStorage present, deployment storage connection kept by Azure).
+  lifecycle {
+    ignore_changes = [
+      app_settings["AzureWebJobsStorage"],
+      storage_access_key,
+    ]
+  }
+
   depends_on = [azurerm_storage_container.deployment]
 }
