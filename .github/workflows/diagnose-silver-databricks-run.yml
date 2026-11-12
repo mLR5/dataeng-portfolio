@@ -1,0 +1,49 @@
+name: Diagnose the last Silver Databricks job run
+
+# Read-only: prints the state, error and trace of the last run of silver-weatherapi.
+on:
+  push:
+    branches: [validation/silver-databricks-run]
+    paths: ['.github/workflows/diagnose-silver-databricks-run.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: dev
+    env:
+      PROJECT: ${{ secrets.TF_VAR_PROJECT_NAME }}
+      ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Databricks authentication
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          for key in clientId clientSecret tenantId; do echo "::add-mask::$(jq -r ".$key" <<<"$AZURE_CREDENTIALS")"; done
+          echo "::add-mask::$(az account show --query id -o tsv)"
+          ws=$(az resource show -g "rg-$PROJECT-$ENVIRONMENT" -n "dbw-$PROJECT-$ENVIRONMENT" \
+                --resource-type Microsoft.Databricks/workspaces --only-show-errors -o json)
+          {
+            echo "ARM_CLIENT_ID=$(jq -r .clientId <<<"$AZURE_CREDENTIALS")"
+            echo "ARM_CLIENT_SECRET=$(jq -r .clientSecret <<<"$AZURE_CREDENTIALS")"
+            echo "ARM_TENANT_ID=$(jq -r .tenantId <<<"$AZURE_CREDENTIALS")"
+            echo "DATABRICKS_HOST=https://$(jq -r .properties.workspaceUrl <<<"$ws")"
+            echo "DATABRICKS_AZURE_RESOURCE_ID=$(jq -r .id <<<"$ws")"
+          } >> "$GITHUB_ENV"
+      - uses: databricks/setup-cli@v0.299.2
+      - name: Last run, its tasks, error and trace
+        run: |
+          job=$(databricks jobs list --name silver-weatherapi -o json | jq -r '.[0].job_id')
+          run=$(databricks jobs list-runs --job-id "$job" --limit 1 -o json | jq -r '.[0].run_id')
+          databricks jobs get-run "$run" -o json | jq '{run_id, state, duration_s: ((.end_time - .start_time)/1000),
+            tasks: [.tasks[] | {task_key, run_id, state, duration_s: ((.end_time - .start_time)/1000)}]}'
+          for t in $(databricks jobs get-run "$run" -o json | jq -r '.tasks[].run_id'); do
+            echo "=== task run $t"
+            databricks jobs get-run-output "$t" -o json | jq -r '"ERROR: " + (.error // "none"), "TRACE:", (.error_trace // "" | .[0:6000])'
+          done
