@@ -16,12 +16,18 @@ resource "azurerm_storage_account" "this" {
   # Data Lake Gen2
   is_hns_enabled = var.enable_hns
 
-  # Network rules
-  network_rules {
-    default_action             = var.network_default_action
-    bypass                     = var.network_bypass
-    ip_rules                   = var.network_ip_rules
-    virtual_network_subnet_ids = var.network_subnet_ids
+  # Network rules. The open default (Allow, no IP or subnet rule) is not returned
+  # as a block by Azure, so declaring it made every plan show it as added.
+  # The block is only sent when a real restriction is configured.
+  dynamic "network_rules" {
+    for_each = (var.network_default_action == "Allow" && length(var.network_ip_rules) == 0
+    && length(var.network_subnet_ids) == 0) ? [] : [1]
+    content {
+      default_action             = var.network_default_action
+      bypass                     = var.network_bypass
+      ip_rules                   = var.network_ip_rules
+      virtual_network_subnet_ids = var.network_subnet_ids
+    }
   }
 
   # Enable large file shares
