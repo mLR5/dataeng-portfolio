@@ -104,32 +104,44 @@ jobs:
           json.dump(report, open(sys.argv[1], "w"), default=str)
           PY
 
+      - name: Write the job runner
+        run: |
+          cat > /tmp/run_job.sh <<'SH'
+          #!/usr/bin/env bash
+          # Start one run, wait for it, print task states; on failure print each task's error.
+          set -uo pipefail
+          job=$(databricks jobs list --name silver-weatherapi -o json | jq -r '.[0].job_id')
+          echo "JOB_ID=$job" >> "$GITHUB_ENV"
+          run=$(databricks jobs run-now "$job" --no-wait -o json | jq -r .run_id)
+          echo "run $run started"
+          while true; do
+            state=$(databricks jobs get-run "$run" -o json)
+            life=$(jq -r .state.life_cycle_state <<<"$state")
+            case "$life" in TERMINATED|SKIPPED|INTERNAL_ERROR) break;; esac
+            sleep 30
+          done
+          jq '{run_id, state, duration_s: ((.end_time - .start_time)/1000), tasks: [.tasks[] | {task_key, state: .state.result_state, duration_s: ((.end_time - .start_time)/1000)}]}' <<<"$state"
+          if [ "$(jq -r .state.result_state <<<"$state")" != "SUCCESS" ]; then
+            for t in $(jq -r '.tasks[] | select(.state.result_state != "SUCCESS") | .run_id' <<<"$state"); do
+              echo "=== task run $t"
+              databricks jobs get-run-output "$t" -o json | jq -r '"ERROR: " + (.error // "none"), (.error_trace // "" | .[0:4000])'
+            done
+            exit 1
+          fi
+          SH
+          chmod +x /tmp/run_job.sh
+
       - name: Silver state before the runs
         run: python /tmp/silver_inspect.py /tmp/before.json
 
       - name: Run the job (first run, whole Bronze history)
-        run: |
-          set +e
-          job=$(databricks jobs list --name silver-weatherapi -o json | jq -r '.[0].job_id')
-          echo "JOB_ID=$job" >> "$GITHUB_ENV"
-          run=$(databricks jobs run-now "$job" --timeout 90m -o json)
-          echo "$run" | jq '{run_id, state: .state, duration_s: ((.end_time - .start_time)/1000), tasks: [.tasks[] | {task_key, state: .state}]}'
-          echo "$run" | jq -r '.tasks[].run_id' > /tmp/tasks1.txt
-          echo "$run" | jq -e '.state.result_state == "SUCCESS"' > /dev/null || {
-            for t in $(cat /tmp/tasks1.txt); do
-              databricks jobs get-run-output "$t" -o json | jq '{error, error_trace: (.error_trace // "" | .[0:3000])}'
-            done
-            exit 1
-          }
+        run: /tmp/run_job.sh
 
       - name: Silver state after the first run
         run: python /tmp/silver_inspect.py /tmp/after1.json
 
       - name: Run the job again (replay must publish nothing)
-        run: |
-          run=$(databricks jobs run-now "$JOB_ID" --timeout 60m -o json)
-          echo "$run" | jq '{run_id, state: .state, duration_s: ((.end_time - .start_time)/1000), tasks: [.tasks[] | {task_key, state: .state}]}'
-          echo "$run" | jq -e '.state.result_state == "SUCCESS"' > /dev/null
+        run: /tmp/run_job.sh
 
       - name: Silver state after the replay, and checks
         run: |
