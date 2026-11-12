@@ -185,6 +185,22 @@ def _status_label(status):
     return {401: "unauthenticated", 403: "forbidden", 404: "not_found"}.get(status, "unavailable")
 
 
+def _api_error(response):
+    """Retain a few diagnostic categories, never arbitrary response strings."""
+    code = response.document.get("error_code")
+    known = {"INVALID_PARAMETER_VALUE", "BAD_REQUEST", "PERMISSION_DENIED", "UNAUTHENTICATED",
+             "UNAUTHORIZED", "RESOURCE_DOES_NOT_EXIST", "INVALID_STATE", "INTERNAL_ERROR",
+             "TEMPORARILY_UNAVAILABLE", "FEATURE_DISABLED"}
+    text = " ".join(str(response.document.get(k, "")) for k in ("message", "detail", "error")).lower()
+    return {
+        "http_status": response.status,
+        "error_code": code if isinstance(code, str) and code in known else "unclassified_error",
+        "workspace_routing_hint": any(k in text for k in ("workspace_id", "workspace id", "workspace-id")),
+        "oauth_requirement_hint": "oauth" in text and any(k in text for k in ("required", "only", "unsupported")),
+        "principal_assignment_hint": "principal" in text and any(k in text for k in ("not found", "not assigned", "does not exist")),
+    }
+
+
 class WorkspaceProbe:
     def __init__(self, *, project, environment, run_id, location=None, http=None, cli=None,
                  clock=time.monotonic, sleep=time.sleep, nonce=None):
@@ -279,17 +295,29 @@ class WorkspaceProbe:
         if _mode(document) != "Serverless" or not self.owned(document):
             raise ProbeError("workspace", "serverless_ownership_gate_failed")
         host = _workspace_host(document.get("properties", {}).get("workspaceUrl"))
+        workspace_id = str(document.get("properties", {}).get("workspaceId", ""))
+        if not re.fullmatch(r"[0-9]{1,32}", workspace_id):
+            raise ProbeError("workspace", "workspace_routing_id_missing")
         headers = {
             "Authorization": "Bearer " + self.cli.token(DATABRICKS_AUDIENCE),
             "X-Databricks-Azure-SP-Management-Token": self.cli.token(ARM_AUDIENCE),
             "X-Databricks-Azure-Workspace-Resource-Id": self.resource_id,
+            "X-Databricks-Workspace-Id": workspace_id,
         }
         identity = self.http.request("GET", host + "/api/2.0/preview/scim/v2/Me", headers=headers)
         details = {"identity_access": _status_label(identity.status), "identity_http_status": identity.status,
-                   "account_admin": "not_verified"}
+                   "account_admin": "not_verified", "workspace_routing_id_supplied": True}
         report["databricks"] = details
         if identity.status != 200:
-            raise ProbeError("databricks_auth", "workspace_identity_unavailable", identity.status)
+            details["identity_error"] = _api_error(identity)
+        jobs = self.http.request("GET", host + "/api/2.1/jobs/list?limit=1", headers=headers)
+        status = self.http.request("GET", host + "/api/2.0/workspace/get-status?path=/", headers=headers)
+        details["jobs_metadata_http_status"] = jobs.status
+        details["workspace_root_http_status"] = status.status
+        if jobs.status != 200:
+            details["jobs_metadata_error"] = _api_error(jobs)
+        if status.status != 200:
+            details["workspace_root_error"] = _api_error(status)
         details["workspace_admin_group_member"] = any(
             isinstance(group, dict) and group.get("display") == "admins"
             for group in identity.document.get("groups", [])
@@ -318,6 +346,9 @@ class WorkspaceProbe:
         details["storage_data_access_tested"] = False
         details["service_credential_access_tested"] = False
         details["compute_started"] = False
+        if not any(r.status == 200 for r in (identity, jobs, status, metastore, credentials)):
+            raise ProbeError("databricks_auth", "workspace_api_access_not_established", identity.status)
+        details["authenticated_read_api_verified"] = True
 
     def cleanup(self):
         if not self.put_attempted or not self.preexisting_absent:
