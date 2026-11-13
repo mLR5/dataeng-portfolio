@@ -171,3 +171,33 @@ def test_spark_tables_stay_readable_by_delta_rs(delta_spark, silver):
         assert table.to_pyarrow_table().cast(TABLE_SCHEMAS[name]).num_rows > 0
         assert table.metadata().configuration.get("delta.appendOnly") == "true"
     assert isinstance(DeltaTable(silver.table(PUBLICATIONS)).to_pyarrow_table(), pa.Table)
+
+
+def test_daily_run_lists_recent_days_and_sunday_lists_everything(delta_spark, tmp_path):
+    bronze = tmp_path / "bronze"
+    (old_blob, old_raw), (new_blob, new_raw) = real_sources()  # collected Oct 17 and Oct 18
+    root = f"file://{tmp_path}/silver"
+    write_bronze(bronze, new_raw, new_blob)
+    first = run(delta_spark, bronze_root=f"file://{bronze}", silver_root=root,
+                now=datetime(2026, 10, 19, 2, tzinfo=timezone.utc))  # Monday, first run: full
+    assert first["published"] == 1
+    write_bronze(bronze, old_raw, old_blob)  # a late archive
+    # Monday 03:00, window Oct 18-19: the Oct 17 archive is outside it.
+    daily = run(delta_spark, bronze_root=f"file://{bronze}", silver_root=root, lookback_days=2,
+                now=datetime(2026, 10, 19, 3, tzinfo=timezone.utc))
+    assert daily["published"] == 0
+    sunday = run(delta_spark, bronze_root=f"file://{bronze}", silver_root=root, lookback_days=2,
+                 now=datetime(2026, 10, 25, 2, tzinfo=timezone.utc))  # Sunday: full scan
+    assert sunday["published"] == 1
+
+
+def test_a_window_without_any_partition_falls_back_to_the_full_listing(delta_spark, tmp_path):
+    bronze = tmp_path / "bronze"
+    for blob, raw in real_sources():
+        write_bronze(bronze, raw, blob)
+    root = f"file://{tmp_path}/silver"
+    first_blob, first_raw = real_sources()[0]
+    process_sources(delta_spark, SilverPaths(root), _sources([(first_blob, first_raw)]))
+    later = run(delta_spark, bronze_root=f"file://{bronze}", silver_root=root, lookback_days=2,
+                now=datetime(2026, 12, 1, 2, tzinfo=timezone.utc))  # no partition in the window
+    assert later["published"] == 1

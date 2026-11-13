@@ -1,4 +1,5 @@
 """Spark-only checks that need no Delta jars: contract mapping, paths, discovery."""
+from datetime import date, datetime, timezone
 import hashlib
 
 import pyarrow as pa
@@ -7,7 +8,7 @@ from pyspark.sql import types as T
 
 from silver_pipeline import (
     FORECAST_TABLE, KEYS, OBSERVATION_TABLE, SPARK_SCHEMAS, TABLE_SCHEMAS, SilverPaths,
-    bronze_identity, ddl, list_bronze, load_sources, spark_type,
+    bronze_identity, bronze_location, ddl, list_bronze, load_sources, recent_days, spark_type,
 )
 
 from conftest import real_sources, write_bronze
@@ -73,3 +74,24 @@ def test_loaded_bytes_are_exact_so_hashes_match_bronze(spark, tmp_path):
         selected.append((f"file:{path}", blob))
     sources = load_sources(spark, selected)
     assert {s.source_blob: s.sha256 for s in sources} == expected
+
+
+def test_recent_days_are_utc_dates_including_today():
+    now = datetime(2026, 11, 14, 1, 30, tzinfo=timezone.utc)
+    assert recent_days(now, 3) == [date(2026, 11, 14), date(2026, 11, 13), date(2026, 11, 12)]
+    assert bronze_location("abfss://bronze@a.dfs.core.windows.net/", recent_days(now, 2)).endswith(
+        "/weather/weatherapi/{2026/11/13,2026/11/14}")
+    assert bronze_location("abfss://bronze@a.dfs.core.windows.net", None).endswith("/weather/weatherapi")
+
+
+def _blob(day, hour, suffix):
+    return f"weather/weatherapi/{day}/{hour:02d}/{day.replace('/', '')}_{hour:02d}0000_{suffix * 32}_weather_data.json"
+
+
+def test_listing_by_day_reads_only_those_partitions(spark, tmp_path):
+    for day, suffix in (("2026/11/10", "a"), ("2026/11/12", "b"), ("2026/11/13", "c")):
+        write_bronze(tmp_path, b"{}", _blob(day, 5, suffix))
+    days = [date(2026, 11, 13), date(2026, 11, 12), date(2026, 11, 11)]  # 11 is missing on purpose
+    recent = sorted(r["source_blob"] for r in list_bronze(spark, f"file://{tmp_path}", days).collect())
+    assert recent == [_blob("2026/11/12", 5, "b"), _blob("2026/11/13", 5, "c")]
+    assert len(list_bronze(spark, f"file://{tmp_path}").collect()) == 3
