@@ -197,6 +197,7 @@ def test_a_window_without_any_partition_falls_back_to_the_full_listing(delta_spa
         write_bronze(bronze, raw, blob)
     root = f"file://{tmp_path}/silver"
     first_blob, first_raw = real_sources()[0]
+    ensure_tables(delta_spark, SilverPaths(root))
     process_sources(delta_spark, SilverPaths(root), _sources([(first_blob, first_raw)]))
     later = run(delta_spark, bronze_root=f"file://{bronze}", silver_root=root, lookback_days=2,
                 now=datetime(2026, 12, 1, 2, tzinfo=timezone.utc))  # no partition in the window
