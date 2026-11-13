@@ -1,0 +1,67 @@
+name: Cost of the Silver Databricks platform
+
+# Read-only: Azure Cost Management for the project resource group (Databricks
+# serverless DBUs are billed through Azure on the workspace), plus the job runs.
+on:
+  push:
+    branches: [validation/silver-databricks-run]
+    paths: ['.github/workflows/cost-silver-databricks.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  cost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: dev
+    env:
+      PROJECT: ${{ secrets.TF_VAR_PROJECT_NAME }}
+      ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Mask identifiers and prepare Databricks auth
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+        run: |
+          sub=$(az account show --query id -o tsv); echo "::add-mask::$sub"
+          for key in clientId clientSecret tenantId; do echo "::add-mask::$(jq -r ".$key" <<<"$AZURE_CREDENTIALS")"; done
+          ws=$(az resource show -g "rg-$PROJECT-$ENVIRONMENT" -n "dbw-$PROJECT-$ENVIRONMENT" \
+                --resource-type Microsoft.Databricks/workspaces --only-show-errors -o json)
+          {
+            echo "SCOPE=/subscriptions/$sub/resourceGroups/rg-$PROJECT-$ENVIRONMENT"
+            echo "ARM_CLIENT_ID=$(jq -r .clientId <<<"$AZURE_CREDENTIALS")"
+            echo "ARM_CLIENT_SECRET=$(jq -r .clientSecret <<<"$AZURE_CREDENTIALS")"
+            echo "ARM_TENANT_ID=$(jq -r .tenantId <<<"$AZURE_CREDENTIALS")"
+            echo "DATABRICKS_HOST=https://$(jq -r .properties.workspaceUrl <<<"$ws")"
+            echo "DATABRICKS_AZURE_RESOURCE_ID=$(jq -r .id <<<"$ws")"
+          } >> "$GITHUB_ENV"
+      - name: Daily cost by resource type and meter (Nov 1 to today)
+        run: |
+          query() {
+            az rest --method post --only-show-errors \
+              --url "https://management.azure.com$SCOPE/providers/Microsoft.CostManagement/query?api-version=2023-11-01" \
+              --body "$1" -o json
+          }
+          to=$(date -u +%Y-%m-%dT23:59:59Z)
+          body=$(jq -n --arg to "$to" '{type:"ActualCost", timeframe:"Custom",
+            timePeriod:{from:"2026-11-01T00:00:00Z", to:$to},
+            dataset:{granularity:"Daily", aggregation:{cost:{name:"Cost",function:"Sum"}},
+                     grouping:[{type:"Dimension",name:"ResourceType"},{type:"Dimension",name:"MeterSubCategory"},{type:"Dimension",name:"Meter"}]}}')
+          result=$(query "$body")
+          jq -r '.properties.columns | map(.name) | @tsv' <<<"$result"
+          jq -r '.properties.rows[] | map(tostring) | @tsv' <<<"$result" | sort
+          echo "--- month to date by resource type"
+          body=$(jq -n '{type:"ActualCost", timeframe:"MonthToDate",
+            dataset:{granularity:"None", aggregation:{cost:{name:"Cost",function:"Sum"}},
+                     grouping:[{type:"Dimension",name:"ResourceType"}]}}')
+          query "$body" | jq -r '.properties.rows[] | map(tostring) | @tsv'
+      - uses: databricks/setup-cli@v0.299.2
+      - name: Silver job runs
+        run: |
+          job=$(databricks jobs list --name silver-weatherapi -o json | jq -r '.[0].job_id')
+          databricks jobs get "$job" -o json | jq '{schedule: .settings.schedule}'
+          databricks jobs list-runs --job-id "$job" --limit 25 -o json | jq -r '.[] |
+            [(.start_time/1000 | todate), .state.result_state, ((.end_time - .start_time)/1000 | floor | tostring) + " s", .trigger] | @tsv'
