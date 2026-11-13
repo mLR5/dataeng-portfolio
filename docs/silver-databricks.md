@@ -17,8 +17,7 @@ Infrastructure* existant.
 
 Ils sont publiés dans le workspace sous `/Shared/weather-silver/`. Le job
 `silver-weatherapi` enchaîne `silver_publish` puis `silver_freshness` sur compute
-serverless en mode de performance *Standard* (démarrage plus lent, moins cher),
-une seule exécution à la fois, 2 retries de la publication, limite de 2 heures.
+serverless (mode de performance par défaut), une seule exécution à la fois, 2 retries de la publication, limite de 2 heures.
 
 Chaque nuit, la découverte ne liste que les 3 derniers jours UTC de Bronze : c'est
 le listing qui coûte en opérations de stockage. Bronze entier est listé au premier

@@ -196,9 +196,6 @@ resource "databricks_job" "silver" {
   # The first production run replays the whole Bronze history (47 min in
   # validation); daily runs take a few minutes.
   timeout_seconds = 7200
-  # Standard mode: slower start (a few minutes), cheaper serverless compute.
-  # Right for a nightly batch where startup latency does not matter.
-  performance_target = "STANDARD"
 
   schedule {
     quartz_cron_expression = "0 0 2 * * ?"
