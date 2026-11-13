@@ -1,4 +1,4 @@
-name: Validate the Silver Databricks job (phase 4)
+name: Validate the Silver Databricks job (phase 5, production root)
 
 # Isolated branch, phase 4 of ADR 0001: runs the deployed job twice on the
 # validation root, then reads the Delta tables directly in ADLS to check that
@@ -24,7 +24,7 @@ jobs:
       PROJECT: ${{ secrets.TF_VAR_PROJECT_NAME }}
       ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
       ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
-      SILVER_PATH: silver/_validation/spark
+      SILVER_PATH: silver/weatherapi
     steps:
       - uses: azure/login@v2
         with:
@@ -150,14 +150,17 @@ jobs:
           import json
           a, b = json.load(open("/tmp/after1.json")), json.load(open("/tmp/after2.json"))
           pub = a["publications"]
+          # Bronze keeps collecting every hour, so a replay may legitimately publish
+          # archives that arrived meanwhile, and only those.
+          pa, pb = a["publications"], b["publications"]
+          arrived = b["bronze_canonical"] - a["bronze_canonical"]
           checks = {
-              "every canonical Bronze archive published": pub["missing_bronze"] == 0,
-              "no unknown ingestion": pub["unknown_ids"] == 0,
-              "one publication per ingestion": pub["distinct_ids"] == pub["rows"],
-              "replay created no Delta version": all(a[t]["version"] == b[t]["version"] for t in
-                  ("observation_snapshots", "forecast_hourly_snapshots", "publications", "quarantine")),
-              "replay inserted no row": all(a[t]["rows"] == b[t]["rows"] for t in
-                  ("observation_snapshots", "forecast_hourly_snapshots", "publications", "quarantine")),
+              "every canonical Bronze archive published (at most the one arriving now)": pb["missing_bronze"] <= 1,
+              "no unknown ingestion": pb["unknown_ids"] == 0,
+              "one publication per ingestion": pb["distinct_ids"] == pb["rows"],
+              "replay published only the archives missing before it": (
+                  pb["rows"] - pa["rows"] == pa["missing_bronze"] + arrived - pb["missing_bronze"]),
+              "quarantine never shrinks": b["quarantine"]["rows"] >= a["quarantine"]["rows"],
           }
           for name, ok in checks.items():
               print(("PASS " if ok else "FAIL ") + name)
