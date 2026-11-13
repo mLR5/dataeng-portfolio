@@ -10,7 +10,7 @@ variable "databricks_enabled" {
 }
 
 variable "databricks_silver_path" {
-  description = "Silver root inside the datalake container. Validation first, then silver/weatherapi."
+  description = "Silver root inside the datalake container: silver/weatherapi in production (set by the workflows)."
   type        = string
   default     = "silver/_validation/spark"
 
@@ -21,7 +21,7 @@ variable "databricks_silver_path" {
 }
 
 variable "databricks_schedule_paused" {
-  description = "Keep the daily 02:00 UTC schedule paused (runs triggered by hand) until validation passed."
+  description = "Pause the daily 02:00 UTC schedule (the workflows run it unpaused in production)."
   type        = bool
   default     = true
 }
@@ -193,7 +193,9 @@ resource "databricks_job" "silver" {
   description = "Publish pending Bronze ingestions into Silver Delta tables, then check freshness."
   # Replaces the Blob lease: never two writers at once.
   max_concurrent_runs = 1
-  timeout_seconds     = 3600
+  # The first production run replays the whole Bronze history (47 min in
+  # validation); daily runs take a few minutes.
+  timeout_seconds = 7200
 
   schedule {
     quartz_cron_expression = "0 0 2 * * ?"
@@ -236,6 +238,9 @@ resource "databricks_job" "silver" {
       base_parameters = {
         bronze_root = local.bronze_root
         silver_root = local.silver_root
+        # Nightly listing limited to the last 3 UTC days; whole Bronze on Sundays.
+        lookback_days     = "3"
+        full_scan_weekday = "6"
       }
     }
   }

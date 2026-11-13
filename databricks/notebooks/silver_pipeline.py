@@ -374,6 +374,7 @@ def process_sources(spark, paths, sources, *, transform=transform_bronze, now=No
 # COMMAND ----------
 
 from dataclasses import dataclass
+from datetime import timedelta, timezone
 
 from pyspark.sql import functions as F
 
@@ -388,30 +389,57 @@ class Discovery:
     pending_total: int
     listed: int
     ignored: int
+    scan: str = "full"
 
     def to_dict(self):
-        return {"listed": self.listed, "ignored_non_canonical": self.ignored,
+        return {"scan": self.scan, "listed": self.listed, "ignored_non_canonical": self.ignored,
                 "pending_total": self.pending_total, "selected": len(self.pending)}
 
 
-def list_bronze(spark, bronze_root):
+def bronze_location(bronze_root, days=None):
+    """Whole Bronze prefix, or only the UTC day partitions given (a brace glob)."""
+    base = f"{bronze_root.rstrip('/')}/{BRONZE_PATH_PREFIX}"
+    if not days:
+        return base
+    return base + "/{" + ",".join(f"{d:%Y/%m/%d}" for d in sorted(set(days))) + "}"
+
+
+def recent_days(now, lookback_days):
+    """The last ``lookback_days`` UTC dates, today included."""
+    today = now.astimezone(timezone.utc).date()
+    return [today - timedelta(days=offset) for offset in range(lookback_days)]
+
+
+def list_bronze(spark, bronze_root, days=None):
     files = (spark.read.format("binaryFile")
              .option("recursiveFileLookup", "true")
              .option("pathGlobFilter", "*_weather_data.json")
-             .load(f"{bronze_root.rstrip('/')}/{BRONZE_PATH_PREFIX}")
+             .load(bronze_location(bronze_root, days))
              .select("path"))
     return (files
             .withColumn("source_blob", F.regexp_extract("path", CANONICAL, 1))
             .withColumn("ingestion_id", F.regexp_extract("path", CANONICAL, 2)))
 
 
-def discover(spark, paths, bronze_root, *, limit, reconcile=False):
+def discover(spark, paths, bronze_root, *, limit, reconcile=False, days=None):
     """Pending canonical sources, oldest first, at most ``limit``.
 
+    ``days`` limits the listing to those UTC day partitions (the daily run);
+    ``None`` lists the whole Bronze prefix. If the partial listing fails (for
+    example no partition matches), the whole prefix is listed instead.
     ``reconcile=True`` returns published ingestions too, so the engine re-reads
     them and fails visibly if a Bronze object changed under a published ID.
     """
-    listing = list_bronze(spark, bronze_root)
+    if days:
+        try:
+            return _discover(spark, paths, bronze_root, limit=limit, reconcile=reconcile, days=days)
+        except Exception as error:  # noqa: BLE001 - fall back to the safe, complete scan
+            _log("SILVER_DISCOVERY_FALLBACK", reason=type(error).__name__)
+    return _discover(spark, paths, bronze_root, limit=limit, reconcile=reconcile, days=None)
+
+
+def _discover(spark, paths, bronze_root, *, limit, reconcile, days):
+    listing = list_bronze(spark, bronze_root, days)
     canonical = listing.where(F.col("source_blob") != "")
     if not reconcile:
         done = spark.read.format("delta").load(paths.table(PUBLICATIONS)).select("ingestion_id")
@@ -423,7 +451,8 @@ def discover(spark, paths, bronze_root, *, limit, reconcile=False):
     pending_total = canonical.count()
     selected = canonical.orderBy("source_blob").limit(limit).select("path", "source_blob").collect()
     return Discovery([(r["path"], r["source_blob"]) for r in selected], pending_total,
-                     int(counts["listed"] or 0), int(counts["ignored"] or 0))
+                     int(counts["listed"] or 0), int(counts["ignored"] or 0),
+                     "full" if not days else f"recent:{len(set(days))}d")
 
 
 def load_sources(spark, selected):
@@ -507,10 +536,23 @@ def _log(event, **values):
     print(json.dumps({"event": event, **values}, sort_keys=True, default=str), flush=True)
 
 
-def run(spark, *, bronze_root, silver_root, batch_size=200, max_batches=50, reconcile=False):
+def run(spark, *, bronze_root, silver_root, batch_size=200, max_batches=50, reconcile=False,
+        lookback_days=3, full_scan_weekday=6, now=None):
+    """Publish pending Bronze ingestions.
+
+    The daily run lists only the last ``lookback_days`` UTC partitions, which is
+    what drives the storage listing cost. The whole Bronze prefix is listed on
+    the first run (no publication yet), on ``full_scan_weekday`` (0 = Monday,
+    6 = Sunday) to catch late archives, with ``reconcile``, or when
+    ``lookback_days`` is 0.
+    """
     paths = SilverPaths(silver_root)
     ensure_tables(spark, paths)
-    found = discover(spark, paths, bronze_root, limit=batch_size * max_batches, reconcile=reconcile)
+    now = now or datetime.now(timezone.utc)
+    first_run = not spark.read.format("delta").load(paths.table(PUBLICATIONS)).limit(1).count()
+    full = reconcile or first_run or lookback_days <= 0 or now.weekday() == full_scan_weekday
+    days = None if full else recent_days(now, lookback_days)
+    found = discover(spark, paths, bronze_root, limit=batch_size * max_batches, reconcile=reconcile, days=days)
     _log("SILVER_DISCOVERY", **found.to_dict())
     totals = {"published": 0, "already_processed": 0, "batches": 0, "statuses": {}}
     for start in range(0, len(found.pending), batch_size):

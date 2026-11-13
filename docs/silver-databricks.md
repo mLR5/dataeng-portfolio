@@ -17,7 +17,13 @@ Infrastructure* existant.
 
 Ils sont publiés dans le workspace sous `/Shared/weather-silver/`. Le job
 `silver-weatherapi` enchaîne `silver_publish` puis `silver_freshness` sur compute
-serverless, une seule exécution à la fois, avec 2 retries de la publication.
+serverless (mode de performance par défaut), une seule exécution à la fois, 2 retries de la publication, limite de 2 heures.
+
+Chaque nuit, la découverte ne liste que les 3 derniers jours UTC de Bronze : c'est
+le listing qui coûte en opérations de stockage. Bronze entier est listé au premier
+run (aucune publication), chaque dimanche pour rattraper une archive tardive, en
+mode `reconcile`, ou si la fenêtre ne correspond à aucune partition. Widgets du
+notebook : `lookback_days` (0 = tout) et `full_scan_weekday` (0 = lundi).
 
 ## Données
 
@@ -73,34 +79,27 @@ Tout passe par *Deploy Infrastructure* (push sur `main` ou lancement manuel).
 | Variable GitHub | Défaut | Effet |
 | --- | --- | --- |
 | `DATABRICKS_ENABLED` | `true` (défaut des workflows) | `false` ne crée rien, ou supprime ce qui existe ; `true` crée workspace serverless, Access Connector, rôles, objets Unity Catalog, notebooks et job |
-| `DATABRICKS_SILVER_PATH` | `silver/_validation/spark` | Racine Silver dans `datalake` ; `silver/weatherapi` en production |
-| `DATABRICKS_SCHEDULE_PAUSED` | `true` | `false` active le job tous les jours à 02 h UTC |
-| `DATABRICKS_ALERT_EMAILS` | `[]` | Liste JSON d'adresses notifiées en cas d'échec |
+| `DATABRICKS_SILVER_PATH` | `silver/weatherapi` (production) | Racine Silver dans `datalake` ; `silver/_validation/spark` a servi à la validation |
+| `DATABRICKS_SCHEDULE_PAUSED` | `false` (production) | `true` suspend le job quotidien de 02 h UTC |
+| `DATABRICKS_ALERT_EMAILS` | `[]` | Liste JSON d'adresses notifiées en cas d'échec ; à définir en variable GitHub (dépôt public : pas d'adresse dans le code) |
 
 Le provider Databricks utilise le même principal de service que `azure/login`
 (secret `AZURE_CREDENTIALS`), qui devient administrateur du workspace qu'il crée.
 
-### Phase 4 : validation
+### Validation (phase 4, 12 novembre 2026)
 
-1. Databricks est activé par défaut dans les workflows : le merge sur `main` déploie tout.
-2. Dans le workspace, lancer le job `silver-weatherapi` à la main (ou le notebook
-   `silver_publish` avec ses widgets). Il traite tout l'historique Bronze vers
-   `silver/_validation/spark`.
-3. Relancer : `published` doit valoir 0 et aucune version Delta ne doit s'ajouter.
-4. Contrôler avec `silver_explore`, puis lire le coût dans `system.billing.usage`.
+Sur `silver/_validation/spark` : 7 151 archives publiées en 47 minutes, relance en
+2 min 30 qui n'a ajouté que la collecte arrivée entre-temps, aucune archive
+manquante ni publication en double. Coût Azure de la journée : 4,42 $ CAD de
+Databricks (calcul serverless et stockage) et environ 0,90 $ de lectures/écritures
+ADLS supplémentaires.
 
-À vérifier pendant cette phase, faute de pouvoir le prouver hors Azure :
-disponibilité des jobs serverless en francecentral, droits du principal pour créer
-la storage credential au niveau du metastore, accès `binaryFile` aux external
-locations, création des tables par chemin, propriétés de table imposées par
-Databricks.
+### Production (phase 5)
 
-### Phase 5 : production
-
-`DATABRICKS_SILVER_PATH=silver/weatherapi`,
-`DATABRICKS_SCHEDULE_PAUSED=false`, adresses d'alerte, puis *Deploy
-Infrastructure*. Après 7 jours verts, Silver devient la source de Gold ; la racine
-de validation peut être supprimée.
+Les workflows déploient la production par défaut : racine `silver/weatherapi`,
+planning actif. Le premier run remplit tout l'historique ; les suivants n'ajoutent
+que les nouvelles collectes. Après 7 jours verts, supprimer `silver/_validation/spark`
+et les branches `validation/*` de cette migration.
 
 ## Exploitation
 
