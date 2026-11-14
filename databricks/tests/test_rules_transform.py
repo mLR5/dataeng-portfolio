@@ -14,7 +14,7 @@ import pyarrow as pa
 import pytest
 
 from silver_rules import bronze_blob_name
-from silver_rules import FORECAST_SCHEMA, FORECAST_TABLE, OBSERVATION_SCHEMA, OBSERVATION_TABLE
+from silver_rules import FORECAST_DAILY_TABLE, FORECAST_SCHEMA, FORECAST_TABLE, OBSERVATION_SCHEMA, OBSERVATION_TABLE
 from silver_rules import transform_bronze
 
 
@@ -30,6 +30,19 @@ def _metrics(temperature=12.5):
             "is_day": 0}
 
 
+def _day(date_text):
+    """Realistic official daily values and sun events (forecastday[].day/astro), v2."""
+    return {"date": date_text,
+            "day": {"maxtemp_c": 14.2, "mintemp_c": 8.1, "avgtemp_c": 11.0, "maxwind_kph": 18.4,
+                    "totalprecip_mm": 1.2, "totalsnow_cm": 0.0, "avgvis_km": 9.6, "avghumidity": 81,
+                    "daily_will_it_rain": 1, "daily_chance_of_rain": 86, "daily_will_it_snow": 0,
+                    "daily_chance_of_snow": 0, "uv": 0.9,
+                    "condition": {"code": 1063, "text": "Pluie éparse à proximité"}},
+            "astro": {"sunrise": "08:15 AM", "sunset": "06:55 PM", "moonrise": "04:05 PM",
+                      "moonset": "No moonset", "moon_phase": "First Quarter", "moon_illumination": 58,
+                      "is_moon_up": 0, "is_sun_up": 0}}
+
+
 def _city(query, country, lat, lon, zone):
     hours = []
     for hour in (20, 21):
@@ -40,7 +53,7 @@ def _city(query, country, lat, lon, zone):
     return {"city": query, "status": "success", "data": {
         "location": {"name": query, "country": country, "lat": lat, "lon": lon, "tz_id": zone},
         "current": {**_metrics(), "last_updated_epoch": int(TARGET.timestamp()), "last_updated": "2026-10-18 22:00"},
-        "forecast": {"forecastday": [{"date": "2026-10-18", "hour": hours}]},
+        "forecast": {"forecastday": [{**_day("2026-10-18"), "hour": hours}]},
     }}
 
 
@@ -165,13 +178,17 @@ def test_invalid_observation_does_not_drop_valid_forecasts_or_invent_observation
 
 
 def test_all_source_rows_invalid_is_rejected_rather_than_success_or_empty(envelope):
+    # v2: a forecastday with a valid date produces a daily row; an invalid date makes
+    # the daily row impossible too, so no table has a valid row.
     for entry in envelope["cities"]:
         entry["data"]["current"]["temp_c"] = None
+        entry["data"]["forecast"]["forecastday"][0]["date"] = "2026-13-01"
         for hour in entry["data"]["forecast"]["forecastday"][0]["hour"]:
             hour["temp_c"] = None
     result = _run(envelope)
     assert result.status == "rejected" and result.summary["reason"] == "no_valid_rows"
     assert result.summary["tables"][FORECAST_TABLE]["rejected_rows"] == 6
+    assert result.summary["tables"][FORECAST_DAILY_TABLE]["rejected_rows"] == 3
 
 
 def test_exact_internal_duplicates_removed_without_collapsing_other_ingestions(envelope):
@@ -272,14 +289,25 @@ def test_malformed_payload_keeps_exact_hash_and_source_identity(envelope, raw):
     json.dumps([r.to_dict() for r in result.rejections], allow_nan=False)
 
 
-@pytest.mark.parametrize("field,value", [("humidity", 101), ("cloud", -1), ("wind_degree", 361),
-                                        ("wind_kph", -0.1), ("precip_mm", -1), ("chance_of_rain", "100.5")])
-def test_one_bad_hour_is_quarantined_without_losing_other_hours(envelope, field, value):
+@pytest.mark.parametrize("field,column,value", [
+    ("humidity", "humidity_pct", 101), ("cloud", "cloud_pct", -1), ("wind_degree", "wind_degree", 361),
+    ("wind_kph", "wind_kph", -0.1), ("precip_mm", "precipitation_mm", -1),
+    ("chance_of_rain", "chance_of_rain_pct", "100.5")])
+def test_one_bad_optional_hour_metric_is_nulled_without_losing_its_row(envelope, field, column, value):
+    # v2 (was: the hour row was rejected): an invalid OPTIONAL measure becomes null,
+    # is quarantined with scope "field", and its row and the other measures are kept.
     _hours(envelope)[0][field] = value
     result = _run(envelope)
-    assert result.status == "partial" and result.forecasts.num_rows == 5
-    assert result.rejections[0].field == field
-    assert result.rejections[0].position.endswith("hour[0]")
+    assert result.status == "success" and result.forecasts.num_rows == 6
+    assert len(result.rejections) == 1
+    rejection = result.rejections[0]
+    assert (rejection.table, rejection.code, rejection.field, rejection.scope) == (
+        FORECAST_TABLE, "out_of_range", field, "field")
+    assert rejection.position.endswith("hour[0]") and rejection.city_query == "Paris"
+    row = next(row for row in result.forecasts.to_pylist()
+               if row["city_id"] == "fr_paris" and row["target_at_utc"] == TARGET)
+    assert row[column] is None and row["temperature_c"] == 12.0
+    assert result.summary["tables"][FORECAST_TABLE]["nulled_metrics"] == 1
 
 
 def test_missing_optional_metric_is_null_required_temperature_is_not_zero(envelope):
@@ -296,17 +324,20 @@ def test_missing_optional_metric_is_null_required_temperature_is_not_zero(envelo
 
 
 @pytest.mark.parametrize("section", ["current", "hour"])
-def test_zero_pressure_rejects_only_its_source_row(envelope, section):
+def test_zero_pressure_nulls_only_its_source_measure(envelope, section):
+    # v2 (was: the source row was rejected): zero pressure is out of range, so only
+    # pressure_mb becomes null; the row is kept and the result stays "success".
     if section == "current":
         envelope["cities"][0]["data"]["current"]["pressure_mb"] = 0
     else:
         _hours(envelope)[0]["pressure_mb"] = 0
     result = _run(envelope)
-    assert result.status == "partial"
-    assert result.observations.num_rows == (2 if section == "current" else 3)
-    assert result.forecasts.num_rows == (6 if section == "current" else 5)
-    assert result.rejections[0].code == "out_of_range"
-    assert result.rejections[0].field == "pressure_mb"
+    assert result.status == "success"
+    assert result.observations.num_rows == 3 and result.forecasts.num_rows == 6
+    assert [(r.code, r.field, r.scope) for r in result.rejections] == [("out_of_range", "pressure_mb", "field")]
+    assert result.rejections[0].table == (OBSERVATION_TABLE if section == "current" else FORECAST_TABLE)
+    table = result.observations if section == "current" else result.forecasts
+    assert sum(row["pressure_mb"] is None for row in table.to_pylist()) == 1
 
 
 @pytest.mark.parametrize("modify,code", [
@@ -357,12 +388,16 @@ def test_missing_forecast_section_is_partial_without_dropping_observation(envelo
 
 
 def test_invalid_unicode_text_is_a_data_rejection_instead_of_arrow_failure(envelope):
+    # v2: condition_text is optional, so it is nulled (scope "field") instead of
+    # rejecting the hour; Arrow never receives the lone surrogate.
     _hours(envelope)[0]["condition"]["text"] = "\ud800"
     raw = json.dumps(envelope, ensure_ascii=True).encode()
     result = _run(envelope, raw=raw)
-    assert result.status == "partial" and result.forecasts.num_rows == 5
+    assert result.status == "success" and result.forecasts.num_rows == 6
     assert result.rejections[0].code == "invalid_type"
     assert result.rejections[0].field == "condition.text"
+    assert result.rejections[0].scope == "field"
+    assert sum(row["condition_text"] is None for row in result.forecasts.to_pylist()) == 1
 
 
 def test_invalid_unicode_city_label_returns_fixed_utf8_safe_diagnostic(envelope):
@@ -384,11 +419,14 @@ def test_invalid_unicode_provider_key_cannot_leak_into_summary(envelope):
     json.dumps(result.summary, ensure_ascii=False).encode("utf-8")
 
 
-def test_new_provider_metric_is_ignored_but_reported_without_its_value(envelope):
+def test_new_provider_metric_is_ignored_without_leaking_its_value(envelope):
+    # v2: summary["ignored_fields"] is replaced by the path registry
+    # (summary["unknown_paths"], silver_registry); values are never copied.
     _hours(envelope)[0]["new_metric"] = "sensitive-unneeded-value"
     result = _run(envelope)
     assert result.status == "success"
-    assert result.summary["ignored_fields"] == {"hour": ["new_metric"]}
+    assert "ignored_fields" not in result.summary
+    assert isinstance(result.summary["unknown_paths"], list)
     assert "sensitive-unneeded-value" not in json.dumps(result.summary)
 
 

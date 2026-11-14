@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from silver_rules import QualityError, boolean, instant, number
+from silver_rules import QualityError, boolean, instant, lenient, number
 
 
 @pytest.mark.parametrize("raw,expected", [("12.5", 12.5), ("-1.25e1", -12.5), (0, 0.0)])
@@ -76,3 +76,28 @@ def test_epoch_that_overflows_source_timezone_is_a_data_error():
     with pytest.raises(QualityError) as failure:
         instant({"time_epoch": 253402300799}, "time_epoch", "time", "Europe/Paris")
     assert failure.value.code == "invalid_timestamp"
+
+
+def test_decimal_probability_is_kept_without_rounding():
+    # v2: chance_of_rain/snow are DOUBLE in [0, 100]; 55.80025 is a valid source value.
+    assert number(55.80025, "chance_of_rain", minimum=0, maximum=100) == 55.80025
+    assert number("55.80025", "chance_of_rain", minimum=0, maximum=100) == 55.80025
+    with pytest.raises(QualityError) as failure:
+        number(100.5, "chance_of_rain", minimum=0, maximum=100)
+    assert failure.value.code == "out_of_range"
+
+
+def test_lenient_nulls_an_invalid_optional_measure_and_records_its_error():
+    nulled = []
+    assert lenient(nulled, lambda: number("7.5", "uv", minimum=0)) == 7.5
+    assert lenient(nulled, lambda: number(None, "uv", minimum=0)) is None
+    assert nulled == []
+    assert lenient(nulled, lambda: number(-1, "uv", minimum=0)) is None
+    assert lenient(nulled, lambda: number(True, "gust_kph", minimum=0)) is None
+    assert [(error.code, error.field) for error in nulled] == [
+        ("out_of_range", "uv"), ("invalid_type", "gust_kph")]
+
+
+def test_lenient_does_not_hide_technical_errors():
+    with pytest.raises(ZeroDivisionError):
+        lenient([], lambda: 1 / 0)
