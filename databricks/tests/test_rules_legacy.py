@@ -210,3 +210,11 @@ def test_unknown_legacy_paths_are_reported_without_values(legacy):
     converted, _ = normalize_envelope(legacy)
     assert "synthetic-secret-value" not in json.dumps(converted)
     assert legacy_unknown_paths({"ingestion_id": "20260119_120000"}) == []
+
+
+def test_transform_summary_reports_legacy_only_unknown_paths(legacy):
+    assert _run(legacy).summary["unknown_paths"] == []
+    legacy["ingestion_metadata"]["api_key"] = "synthetic-secret-value"
+    summary = _run(legacy).summary
+    assert summary["unknown_paths"] == ["legacy:ingestion_metadata.api_key"]
+    assert "synthetic-secret-value" not in json.dumps(summary)

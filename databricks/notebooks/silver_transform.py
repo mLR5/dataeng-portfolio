@@ -287,8 +287,10 @@ def transform_bronze(raw: bytes, source_blob: str) -> TransformResult:
         reject("envelope", QualityError("invalid_json", None, "Bronze payload is not valid unique-key JSON"))
         return result(reason="invalid_json")
     # v2: the historical envelope is converted, then checked like the current one.
+    # Legacy-only keys disappear in the conversion: report them first, prefixed "legacy:".
+    legacy_unknown = ["legacy:" + path for path in legacy_unknown_paths(data)]
     data, summary["bronze_format"] = normalize_envelope(data)
-    summary["unknown_paths"] = unknown_paths(data) if isinstance(data, dict) else []
+    summary["unknown_paths"] = sorted(legacy_unknown + (unknown_paths(data) if isinstance(data, dict) else []))
     summary["requested_horizon_days"] = _requested_horizon_days(data)
     # Preserve trustworthy metadata on a rejected envelope without inventing it.
     if isinstance(data, dict):
