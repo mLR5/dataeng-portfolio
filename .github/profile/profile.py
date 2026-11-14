@@ -140,6 +140,6 @@ q("codes observed and forecast", "select condition_code, any_value(condition_tex
 q("texts per code and day/night", "select condition_code, is_day, count(distinct condition_text) from (select condition_code, condition_text, is_day from obs union all select condition_code, condition_text, is_day from fc) group by 1,2 having count(distinct condition_text) > 1 order by 1 limit 20")
 
 section("SILVER CONTROL")
-q("publications per month and status", "select strftime(collected_at_utc, '%Y-%m') month, status, count(*) from pub group by all order by 1, 2")
+q("publications per month and status", "select strftime(collected_at_utc, '%Y-%m') mon, status, count(*) from pub group by all order by 1, 2")
 q("quarantine by table, code, city", "select table_name, code, city_query, count(*) from quar group by all order by 4 desc limit 25")
 q("summary keys sample", "select summary_json from pub where status = 'success' order by collected_at_utc desc limit 1")
