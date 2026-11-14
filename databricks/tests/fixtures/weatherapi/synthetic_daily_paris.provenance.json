@@ -1,0 +1,10 @@
+{
+  "kind": "synthetic",
+  "description": "Artificial Paris forecastday blocks (day + astro, no hour[]), handcrafted for daily_row tests. Values imitate the shape of real Bronze but were never fetched from WeatherAPI or Bronze. Sun times approximate Paris around the 2026 DST changes; 2026-03-28/29 omit avgwetbulb_c/maxwetbulb_c like older archives.",
+  "expected_city_id": "fr_paris",
+  "expected_days": 5,
+  "dst_days": {
+    "spring_forward": "2026-03-29",
+    "fall_back": "2026-10-25"
+  }
+}

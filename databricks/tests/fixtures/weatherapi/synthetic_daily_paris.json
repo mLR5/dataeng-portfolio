@@ -1,0 +1,213 @@
+{
+ "city": "Paris",
+ "tz_id": "Europe/Paris",
+ "forecastday": [
+  {
+   "date": "2026-10-18",
+   "day": {
+    "maxtemp_c": 15.0,
+    "maxtemp_f": 59.0,
+    "mintemp_c": 9.2,
+    "mintemp_f": 48.6,
+    "avgtemp_c": 12.1,
+    "avgtemp_f": 53.8,
+    "maxwind_mph": 9.2,
+    "maxwind_kph": 14.8,
+    "totalprecip_mm": 0.05,
+    "totalprecip_in": 0.0,
+    "totalsnow_cm": 0.0,
+    "avgvis_km": 10.0,
+    "avgvis_miles": 6.0,
+    "avghumidity": 57,
+    "daily_will_it_rain": 0,
+    "daily_chance_of_rain": 0,
+    "daily_will_it_snow": 0,
+    "daily_chance_of_snow": 0,
+    "condition": {
+     "text": "Ensoleillé",
+     "icon": "//cdn.weatherapi.com/weather/64x64/day/113.png",
+     "code": 1000
+    },
+    "uv": 2.2,
+    "avgwetbulb_c": 7.9,
+    "avgwetbulb_f": 46.2,
+    "maxwetbulb_c": 8.6,
+    "maxwetbulb_f": 47.5
+   },
+   "astro": {
+    "sunrise": "08:15 AM",
+    "sunset": "06:55 PM",
+    "moonrise": "04:05 PM",
+    "moonset": "Does not set today",
+    "moon_phase": "First Quarter",
+    "moon_illumination": 58,
+    "is_moon_up": 0,
+    "is_sun_up": 0
+   }
+  },
+  {
+   "date": "2026-03-28",
+   "day": {
+    "maxtemp_c": 12.3,
+    "maxtemp_f": 54.1,
+    "mintemp_c": 4.1,
+    "mintemp_f": 39.4,
+    "avgtemp_c": 8.0,
+    "avgtemp_f": 46.4,
+    "maxwind_mph": 9.2,
+    "maxwind_kph": 14.8,
+    "totalprecip_mm": 3.4,
+    "totalprecip_in": 0.0,
+    "totalsnow_cm": 0.0,
+    "avgvis_km": 10.0,
+    "avgvis_miles": 6.0,
+    "avghumidity": 81.5,
+    "daily_will_it_rain": 1,
+    "daily_chance_of_rain": 55.80025,
+    "daily_will_it_snow": 0,
+    "daily_chance_of_snow": 0,
+    "condition": {
+     "text": "Pluie légère",
+     "icon": "//cdn.weatherapi.com/weather/64x64/day/296.png",
+     "code": 1183
+    },
+    "uv": 1
+   },
+   "astro": {
+    "sunrise": "06:24 AM",
+    "sunset": "07:18 PM",
+    "moonrise": "04:05 PM",
+    "moonset": "Does not set today",
+    "moon_phase": "First Quarter",
+    "moon_illumination": 58,
+    "is_moon_up": 0,
+    "is_sun_up": 0
+   }
+  },
+  {
+   "date": "2026-03-29",
+   "day": {
+    "maxtemp_c": 11.8,
+    "maxtemp_f": 53.2,
+    "mintemp_c": 3.6,
+    "mintemp_f": 38.5,
+    "avgtemp_c": 7.4,
+    "avgtemp_f": 45.3,
+    "maxwind_mph": 9.2,
+    "maxwind_kph": 14.8,
+    "totalprecip_mm": 0.05,
+    "totalprecip_in": 0.0,
+    "totalsnow_cm": 0.0,
+    "avgvis_km": 10.0,
+    "avgvis_miles": 6.0,
+    "avghumidity": 57,
+    "daily_will_it_rain": 0,
+    "daily_chance_of_rain": 0,
+    "daily_will_it_snow": 0,
+    "daily_chance_of_snow": 0,
+    "condition": {
+     "text": "Ensoleillé",
+     "icon": "//cdn.weatherapi.com/weather/64x64/day/113.png",
+     "code": 1000
+    },
+    "uv": 2.2
+   },
+   "astro": {
+    "sunrise": "07:22 AM",
+    "sunset": "08:20 PM",
+    "moonrise": "04:05 PM",
+    "moonset": "Does not set today",
+    "moon_phase": "First Quarter",
+    "moon_illumination": 58,
+    "is_moon_up": 0,
+    "is_sun_up": 0
+   }
+  },
+  {
+   "date": "2026-10-24",
+   "day": {
+    "maxtemp_c": 14.2,
+    "maxtemp_f": 57.6,
+    "mintemp_c": 8.0,
+    "mintemp_f": 46.4,
+    "avgtemp_c": 11.0,
+    "avgtemp_f": 51.8,
+    "maxwind_mph": 9.2,
+    "maxwind_kph": 14.8,
+    "totalprecip_mm": 0.05,
+    "totalprecip_in": 0.0,
+    "totalsnow_cm": 0.0,
+    "avgvis_km": 10.0,
+    "avgvis_miles": 6.0,
+    "avghumidity": 57,
+    "daily_will_it_rain": 0,
+    "daily_chance_of_rain": 0,
+    "daily_will_it_snow": 0,
+    "daily_chance_of_snow": 0,
+    "condition": {
+     "text": "Ensoleillé",
+     "icon": "//cdn.weatherapi.com/weather/64x64/day/113.png",
+     "code": 1000
+    },
+    "uv": 2.2,
+    "avgwetbulb_c": 7.9,
+    "avgwetbulb_f": 46.2,
+    "maxwetbulb_c": 8.6,
+    "maxwetbulb_f": 47.5
+   },
+   "astro": {
+    "sunrise": "08:22 AM",
+    "sunset": "06:37 PM",
+    "moonrise": "04:05 PM",
+    "moonset": "Does not set today",
+    "moon_phase": "First Quarter",
+    "moon_illumination": 58,
+    "is_moon_up": 0,
+    "is_sun_up": 0
+   }
+  },
+  {
+   "date": "2026-10-25",
+   "day": {
+    "maxtemp_c": 13.9,
+    "maxtemp_f": 57.0,
+    "mintemp_c": 7.5,
+    "mintemp_f": 45.5,
+    "avgtemp_c": 10.4,
+    "avgtemp_f": 50.7,
+    "maxwind_mph": 9.2,
+    "maxwind_kph": 14.8,
+    "totalprecip_mm": 0.05,
+    "totalprecip_in": 0.0,
+    "totalsnow_cm": 0.0,
+    "avgvis_km": 10.0,
+    "avgvis_miles": 6.0,
+    "avghumidity": 57,
+    "daily_will_it_rain": 0,
+    "daily_chance_of_rain": 0,
+    "daily_will_it_snow": 0,
+    "daily_chance_of_snow": 0,
+    "condition": {
+     "text": "Ensoleillé",
+     "icon": "//cdn.weatherapi.com/weather/64x64/day/113.png",
+     "code": 1000
+    },
+    "uv": 2.2,
+    "avgwetbulb_c": 7.9,
+    "avgwetbulb_f": 46.2,
+    "maxwetbulb_c": 8.6,
+    "maxwetbulb_f": 47.5
+   },
+   "astro": {
+    "sunrise": "07:23 AM",
+    "sunset": "05:35 PM",
+    "moonrise": "04:05 PM",
+    "moonset": "Does not set today",
+    "moon_phase": "First Quarter",
+    "moon_illumination": 58,
+    "is_moon_up": 0,
+    "is_sun_up": 0
+   }
+  }
+ ]
+}
