@@ -10,10 +10,10 @@ Infrastructure* existant.
 | Notebook | Rôle |
 | --- | --- |
 | `silver_rules` | Contrat des tables, registre des villes, qualité, `transform_bronze`, contrôles de cohérence. Python pur |
-| `silver_pipeline` | `%run ./silver_rules`, puis schémas Spark, écriture Delta insert-only, découverte Bronze, lecture Gold, fraîcheur |
-| `silver_publish` | Tâche 1 du job : widgets, puis publication des ingestions en attente |
+| `silver_pipeline` | `%run ./silver_rules`, puis schémas Spark, écriture Delta insert-only, découverte Bronze, lecture Gold, noms Unity Catalog, fraîcheur |
+| `silver_publish` | Tâche 1 du job : widgets, publication des ingestions en attente, puis enregistrement des noms Unity Catalog stables (widget `uc_schema`) |
 | `silver_freshness` | Tâche 2 du job : échoue si la dernière collecte publiée a plus de 26 h ou si les 24 dernières heures comptent moins de 20 publications |
-| `silver_explore` | Lecture seule : publications par jour et statut, rejets fréquents, prévisions lues comme Gold |
+| `silver_explore` | Lecture seule : publications par jour et statut, rejets fréquents (par portée), contrôles v2, prévisions horaires et quotidiennes lues comme Gold |
 
 Ils sont publiés dans le workspace sous `/Shared/weather-silver/`. Le job
 `silver-weatherapi` enchaîne `silver_publish` puis `silver_freshness` sur compute
@@ -28,23 +28,42 @@ notebook : `lookback_days` (0 = tout) et `full_scan_weekday` (0 = lundi).
 ## Données
 
 ```text
-datalake/<racine Silver>/
+datalake/<racine Silver>/            silver/weatherapi_v2 pour le modèle v2
   observation_snapshots/            clé ingestion_id, city_id, observed_at_utc
   forecast_hourly_snapshots/        clé ingestion_id, city_id, target_at_utc
+  forecast_daily_snapshots/         clé ingestion_id, city_id, target_local_date
   _control/quarantine/              clé ingestion_id, rejection_index
   _control/publications/            clé ingestion_id : registre d'avancement
 ```
 
-Les quatre tables Delta sont `delta.appendOnly=true`, sans deletion vectors, et
+Les cinq tables Delta sont `delta.appendOnly=true`, sans deletion vectors, et
 restent lisibles par delta-rs 1.2.1 (testé en CI). Aucun checkpoint, curseur ou
 lease : la table `publications` dit ce qui est fait.
+
+Ordre d'écriture d'un lot : observations, prévisions horaires, prévisions
+quotidiennes, quarantaine, puis publications, strictement en dernier.
+
+La quarantaine porte la colonne `scope` : `row` (la ligne est retirée) ou `field`
+(une mesure optionnelle invalide est mise à NULL, la ligne est gardée). Son
+empreinte `quarantine_sha256` couvre cette colonne.
+
+Colonnes de contrôle de `publications` (en plus de la version Delta et du nombre
+de lignes de chacune des trois tables : `observation_*`, `forecast_*`,
+`forecast_daily_*`) :
+
+| Colonne | Contenu |
+| --- | --- |
+| `bronze_format` | `current` ou `legacy` (enveloppe historique convertie) ; `current` si le résumé ne le dit pas (JSON illisible) |
+| `requested_horizon_days` | Horizon demandé à WeatherAPI (`forecast_request.days`), NULL s'il est absent |
+| `nulled_metrics` | Nombre de rejets `scope = field`, donc de mesures mises à NULL |
+| `unknown_path_count`, `unknown_paths_json` | Chemins Bronze sans décision dans le registre (alerte, pas d'évolution de schéma) |
 
 | Garantie | Mise en œuvre |
 | --- | --- |
 | Insert-only, pas de mise à jour de snapshot | `MERGE ... WHEN NOT MATCHED THEN INSERT *` sur les clés du contrat, tables append-only |
 | Une ligne existante différente est refusée | `exceptAll` sur la ligne entière avant et après le `MERGE` (`SnapshotConflict`) |
 | Bronze modifié sous un ID publié | `PublicationConflict`, visible avec le widget `reconcile=true` |
-| Publication après les deux tables | Écrite en dernier ; Gold filtre sur les publications complètes |
+| Publication après les trois tables | Écrite en dernier, après la quarantaine ; Gold filtre sur les publications complètes |
 | Reprise après panne entre tables | Les lignes déjà écrites sont comparées égales, rien n'est réinséré |
 | Un seul écrivain | `max_concurrent_runs = 1` + isolation optimiste Delta ; un conflit fait échouer la tâche, rejouée |
 
@@ -54,11 +73,31 @@ lease : la table `publications` dit ce qui est fait.
 # MAGIC %run /Shared/weather-silver/silver_pipeline
 plan = published_read_plan(spark, SilverPaths(silver_root), collected_before=cutoff)
 forecasts = read_published(spark, plan, FORECAST_TABLE)
+daily = read_published(spark, plan, FORECAST_DAILY_TABLE)
 ```
 
-Le plan fige les IDs publiés et la version maximale de chaque table ; la lecture se
-fait à cette version (`versionAsOf`) avec un filtre sur ces IDs. Ne jamais lire les
-Parquet par glob.
+Le plan fige les IDs publiés et la version maximale de chacune des trois tables ;
+la lecture se fait à cette version (`versionAsOf`) avec un filtre sur ces IDs. Ne
+jamais lire les Parquet par glob.
+
+## Noms stables Unity Catalog
+
+Avec le widget `uc_schema` (par exemple `weather.silver`), `silver_publish`
+appelle `register_tables` après une exécution réussie : chacune des cinq tables
+devient une table EXTERNAL `<catalogue>.<schéma>.<table>` sur son chemin Delta.
+Les lecteurs utilisent `weather.silver.<table>` et n'ont plus à connaître la racine.
+
+- Idempotent : un nom déjà enregistré au bon emplacement n'est pas touché.
+- Nouvelle racine (par exemple `silver/weatherapi` vers `silver/weatherapi_v2`) :
+  la définition est supprimée puis recréée sur le nouveau chemin. Supprimer une
+  table EXTERNAL ne supprime pas ses fichiers ; une table MANAGED du même nom est
+  refusée (`CatalogConflict`), jamais supprimée.
+- `uc_schema` doit être exactement `catalogue.schéma` (lettres, chiffres, `_`),
+  validé avant toute écriture ; vide, aucun nom n'est enregistré.
+- Le schéma Unity Catalog doit exister, et l'identité du job doit pouvoir créer
+  une table externe sur l'emplacement externe Silver (`CREATE EXTERNAL TABLE`).
+- Entre la suppression et la recréation d'un nom déplacé, un lecteur peut ne pas
+  le trouver : relancer la lecture.
 
 ## Tests
 

@@ -2,8 +2,8 @@
 # MAGIC %md
 # MAGIC # Silver WeatherAPI : pipeline Spark
 # MAGIC
-# MAGIC Schémas Spark, écriture Delta insert-only, découverte Bronze, lecture Gold et
-# MAGIC fraîcheur. Chargé par `%run` depuis les notebooks du job.
+# MAGIC Schémas Spark, écriture Delta insert-only, découverte Bronze, lecture Gold,
+# MAGIC noms Unity Catalog et fraîcheur. Chargé par `%run` depuis les notebooks du job.
 
 # COMMAND ----------
 
@@ -75,8 +75,16 @@ PUBLICATION_SCHEMA = T.StructType([
     T.StructField("observation_row_count", T.IntegerType(), False),
     T.StructField("forecast_version", T.LongType(), False),
     T.StructField("forecast_row_count", T.IntegerType(), False),
+    T.StructField("forecast_daily_version", T.LongType(), False),
+    T.StructField("forecast_daily_row_count", T.IntegerType(), False),
     T.StructField("quarantine_count", T.IntegerType(), False),
     T.StructField("quarantine_sha256", T.StringType(), False),
+    # v2 control columns, copied from the transformation summary for monitoring.
+    T.StructField("bronze_format", T.StringType(), False),
+    T.StructField("requested_horizon_days", T.ShortType(), True),
+    T.StructField("nulled_metrics", T.IntegerType(), False),
+    T.StructField("unknown_path_count", T.IntegerType(), False),
+    T.StructField("unknown_paths_json", T.StringType(), False),
 ])
 
 QUARANTINE_SCHEMA = T.StructType([
@@ -86,17 +94,30 @@ QUARANTINE_SCHEMA = T.StructType([
     T.StructField("source_sha256", T.StringType(), False),
     T.StructField("table_name", T.StringType(), False),
     T.StructField("code", T.StringType(), False),
+    # "row": the row was removed; "field": one optional measure was nulled, row kept.
+    T.StructField("scope", T.StringType(), False),
     T.StructField("city_query", T.StringType(), True),
     T.StructField("position", T.StringType(), True),
     T.StructField("field", T.StringType(), True),
     T.StructField("message", T.StringType(), False),
 ])
 
+# Business tables in write order (contract order); control tables are written after them.
+SILVER_DATA_TABLES = tuple(TABLE_SCHEMAS)
+# Publication columns holding, per business table, its Delta version and the row count.
+PUBLICATION_VERSION_COLUMNS = {
+    OBSERVATION_TABLE: "observation_version", FORECAST_TABLE: "forecast_version",
+    FORECAST_DAILY_TABLE: "forecast_daily_version",
+}
+PUBLICATION_ROW_COUNT_COLUMNS = {
+    OBSERVATION_TABLE: "observation_row_count", FORECAST_TABLE: "forecast_row_count",
+    FORECAST_DAILY_TABLE: "forecast_daily_row_count",
+}
+
 SPARK_SCHEMAS = {
-    OBSERVATION_TABLE: spark_schema(TABLE_SCHEMAS[OBSERVATION_TABLE]),
-    FORECAST_TABLE: spark_schema(TABLE_SCHEMAS[FORECAST_TABLE]),
-    PUBLICATIONS: PUBLICATION_SCHEMA,
+    **{name: spark_schema(TABLE_SCHEMAS[name]) for name in SILVER_DATA_TABLES},
     QUARANTINE: QUARANTINE_SCHEMA,
+    PUBLICATIONS: PUBLICATION_SCHEMA,
 }
 KEYS = {**TABLE_KEYS, PUBLICATIONS: ("ingestion_id",), QUARANTINE: ("ingestion_id", "rejection_index")}
 
@@ -106,7 +127,8 @@ TABLE_PROPERTIES = {
     "delta.enableDeletionVectors": "false",
 }
 
-_SAFE_ROOT = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:/{1,3}[^`'\s]+$|^/[^`'\s]+$")
+# Paths are interpolated into SQL (delta.`...`, LOCATION '...'): no quote, backslash or space.
+_SAFE_ROOT = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:/{1,3}[^`'\s\\]+$|^/[^`'\s\\]+$")
 
 
 @dataclass(frozen=True)
@@ -121,7 +143,7 @@ class SilverPaths:
         object.__setattr__(self, "root", root)
 
     def table(self, name):
-        if name in (OBSERVATION_TABLE, FORECAST_TABLE):
+        if name in SILVER_DATA_TABLES:
             return f"{self.root}/{name}"
         if name in (PUBLICATIONS, QUARANTINE):
             return f"{self.root}/_control/{name}"
@@ -150,8 +172,9 @@ def ddl(schema):
 # MAGIC   optimistic concurrency; a conflicting commit fails the run, which is replayed;
 # MAGIC - insert-only ``MERGE`` on the contract keys, after proving that rows already
 # MAGIC   present for these ingestions are identical to the expected ones;
-# MAGIC - the publication row is written last, so a reader filtering on publications
-# MAGIC   never sees an ingestion that is missing from one of the two tables.
+# MAGIC - write order: observations, hourly forecasts, daily forecasts, quarantine,
+# MAGIC   then the publication row, strictly last, so a reader filtering on publications
+# MAGIC   never sees an ingestion that is missing from one of the three business tables.
 # MAGIC
 # MAGIC A run stopped between two writes is repaired by the next run: rows already
 # MAGIC written compare equal, nothing is inserted twice, and the publication follows.
@@ -209,7 +232,7 @@ def _delta(path):
 
 
 def ensure_tables(spark, paths):
-    """Create the four tables with explicit schemas; never infer or evolve them."""
+    """Create the five tables with explicit schemas; never infer or evolve them."""
     properties = ", ".join(f"'{k}' = '{v}'" for k, v in TABLE_PROPERTIES.items())
     for name, schema in SPARK_SCHEMAS.items():
         spark.sql(
@@ -281,10 +304,12 @@ def published(spark, paths, ingestion_ids):
 def _quarantine_rows(result, ingestion_id):
     rows = []
     for index, record in enumerate(quarantine_records(result, ingestion_id)):
+        if record["scope"] not in REJECTION_SCOPES:
+            raise PublicationConflict("Unknown rejection scope")
         rows.append({
             "ingestion_id": ingestion_id, "rejection_index": index,
             "source_blob": record["source_blob"], "source_sha256": record["source_sha256"],
-            "table_name": record["table"], "code": record["code"],
+            "table_name": record["table"], "code": record["code"], "scope": record["scope"],
             "city_query": record["city_query"], "position": record["position"],
             "field": record["field"], "message": record["message"],
         })
@@ -295,6 +320,32 @@ def _quarantine_sha256(result, ingestion_id):
     # Byte-identical to the S3 JSONL object, so both engines can be compared.
     payload = b"".join(json_bytes(r) + b"\n" for r in quarantine_records(result, ingestion_id))
     return hashlib.sha256(payload).hexdigest()
+
+
+def publication_controls(result):
+    """v2 control columns of a publication, with safe defaults for absent summary keys.
+
+    A key present with a wrong type is a transformation bug and fails the batch
+    (``PublicationConflict``) rather than being published as a default value.
+    """
+    summary = result.summary
+    bronze_format = summary.get("bronze_format", "current")
+    if bronze_format not in BRONZE_FORMATS:
+        raise PublicationConflict("Unknown Bronze format in summary")
+    horizon = summary.get("requested_horizon_days")
+    if horizon is not None and (type(horizon) is not int or not 0 <= horizon <= 32767):
+        raise PublicationConflict("Invalid requested horizon in summary")
+    unknown = summary.get("unknown_paths", [])
+    if not isinstance(unknown, list) or not all(isinstance(p, str) for p in unknown):
+        raise PublicationConflict("Unknown paths must be a list of strings")
+    return {
+        "bronze_format": bronze_format,
+        "requested_horizon_days": horizon,
+        # Counted from the rejections themselves: one per nulled optional measure.
+        "nulled_metrics": sum(1 for r in result.rejections if r.scope == "field"),
+        "unknown_path_count": len(unknown),
+        "unknown_paths_json": json_bytes(unknown).decode("utf-8"),
+    }
 
 
 def process_sources(spark, paths, sources, *, transform=transform_bronze, now=None):
@@ -322,7 +373,7 @@ def process_sources(spark, paths, sources, *, transform=transform_bronze, now=No
 
     ids = {ingestion_id for ingestion_id, _, _ in pending}
     commits = {}
-    for name in (OBSERVATION_TABLE, FORECAST_TABLE):
+    for name in SILVER_DATA_TABLES:
         rows = [row for _, _, result in pending for row in result.tables[name].to_pylist()]
         commits[name] = merge_insert_only(spark, paths, name, rows, ids)
     quarantine = [row for ingestion_id, _, result in pending for row in _quarantine_rows(result, ingestion_id)]
@@ -331,20 +382,20 @@ def process_sources(spark, paths, sources, *, transform=transform_bronze, now=No
     published_at = now or datetime.now(timezone.utc)
     publications = []
     for ingestion_id, source, result in pending:
-        observations, forecasts = result.tables[OBSERVATION_TABLE], result.tables[FORECAST_TABLE]
-        publications.append({
+        publication = {
             "ingestion_id": ingestion_id, "complete": True, "engine": ENGINE,
             "schema_version": SCHEMA_VERSION, "transform_version": TRANSFORM_VERSION,
             "source": SOURCE, "source_blob": source.source_blob, "source_sha256": source.sha256,
             "collected_at_utc": result.collected_at_utc, "published_at_utc": published_at,
             "status": result.status, "summary_json": json_bytes(result.summary).decode("utf-8"),
-            "observation_version": commits[OBSERVATION_TABLE][1],
-            "observation_row_count": observations.num_rows,
-            "forecast_version": commits[FORECAST_TABLE][1],
-            "forecast_row_count": forecasts.num_rows,
             "quarantine_count": len(result.rejections),
             "quarantine_sha256": _quarantine_sha256(result, ingestion_id),
-        })
+            **publication_controls(result),
+        }
+        for name in SILVER_DATA_TABLES:
+            publication[PUBLICATION_VERSION_COLUMNS[name]] = commits[name][1]
+            publication[PUBLICATION_ROW_COUNT_COLUMNS[name]] = result.tables[name].num_rows
+        publications.append(publication)
         batch.statuses[result.status] = batch.statuses.get(result.status, 0) + 1
     # Publications are not compared row by row (published_at differs on a replay):
     # only missing IDs are inserted, then identity and hash are checked.
@@ -490,7 +541,7 @@ def published_read_plan(spark, paths, *, collected_before=None):
         publications = publications.where(F.col("collected_at_utc") < F.lit(collected_before))
     rows = publications.select(
         "ingestion_id", "schema_version", "transform_version",
-        "observation_version", "forecast_version").collect()
+        *(PUBLICATION_VERSION_COLUMNS[name] for name in SILVER_DATA_TABLES)).collect()
     ids = set()
     for row in rows:
         if row["schema_version"] != SCHEMA_VERSION or row["transform_version"] != TRANSFORM_VERSION:
@@ -499,8 +550,8 @@ def published_read_plan(spark, paths, *, collected_before=None):
             raise PublicationConflict("Duplicate publication identity")
         ids.add(row["ingestion_id"])
     versions = {
-        OBSERVATION_TABLE: max((r["observation_version"] for r in rows), default=None),
-        FORECAST_TABLE: max((r["forecast_version"] for r in rows), default=None),
+        name: max((r[PUBLICATION_VERSION_COLUMNS[name]] for r in rows), default=None)
+        for name in SILVER_DATA_TABLES
     }
     return {"ingestion_ids": sorted(ids), "tables": {
         name: {"path": paths.table(name), "version": version}
@@ -512,6 +563,75 @@ def read_published(spark, plan, table_name):
     spec = plan["tables"][table_name]
     return (spark.read.format("delta").option("versionAsOf", spec["version"]).load(spec["path"])
             .where(F.col("ingestion_id").isin(plan["ingestion_ids"])))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Noms stables Unity Catalog
+# MAGIC
+# MAGIC Readers use `<catalog>.<schema>.<table>` instead of storage paths. Each of the five
+# MAGIC tables is registered as an EXTERNAL table on its Delta path: the data stays where
+# MAGIC the pipeline writes it, and a new Silver root only moves the names.
+# MAGIC
+# MAGIC A name already registered at another location is dropped then recreated: dropping
+# MAGIC an EXTERNAL table removes only its definition, never its files. A MANAGED table of
+# MAGIC the same name is refused, because dropping it would delete its data.
+
+# COMMAND ----------
+
+import re
+
+
+class CatalogConflict(ValueError):
+    """A Unity Catalog name cannot safely point to the Silver path."""
+
+
+_UC_SCHEMA = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,254}\.[A-Za-z_][A-Za-z0-9_]{0,254}")
+
+
+def uc_table_name(uc_schema, name):
+    """Quoted three-part name ``catalog.schema.table`` for one Silver table."""
+    if not isinstance(uc_schema, str) or not _UC_SCHEMA.fullmatch(uc_schema):
+        raise ValueError("uc_schema must be <catalog>.<schema> (letters, digits, underscore)")
+    if name not in SPARK_SCHEMAS:
+        raise ValueError("Unknown Silver table")
+    catalog, schema = uc_schema.split(".")
+    return f"`{catalog}`.`{schema}`.`{name}`"
+
+
+def _same_location(left, right):
+    # Spark reports local paths as file:/x, the pipeline writes file:///x.
+    def normal(path):
+        return re.sub(r"^file:/+", "file:/", str(path)).rstrip("/")
+    return normal(left) == normal(right)
+
+
+def register_tables(spark, paths, uc_schema):
+    """Point ``{uc_schema}.{table}`` at each Silver Delta path; idempotent.
+
+    Returns ``{table: "created" | "relocated" | "unchanged"}``. The tables must
+    already exist as Delta tables (``ensure_tables``); the schema is read from them.
+    """
+    names = {name: uc_table_name(uc_schema, name) for name in SPARK_SCHEMAS}
+    actions = {}
+    for name, qualified in names.items():
+        location = paths.table(name)
+        if spark.catalog.tableExists(qualified):
+            current = spark.sql(f"DESCRIBE DETAIL {qualified}").collect()[0]["location"]
+            if _same_location(current, location):
+                actions[name] = "unchanged"
+                continue
+            if spark.catalog.getTable(qualified).tableType.upper() != "EXTERNAL":
+                raise CatalogConflict(f"Refusing to replace a non-external table: {name}")
+            spark.sql(f"DROP TABLE {qualified}")
+            actions[name] = "relocated"
+        else:
+            actions[name] = "created"
+        spark.sql(f"CREATE TABLE {qualified} USING DELTA LOCATION '{location}'")
+    _log("SILVER_CATALOG", uc_schema=uc_schema, **{
+        action: sum(1 for a in actions.values() if a == action)
+        for action in ("created", "relocated", "unchanged")})
+    return actions
 
 # COMMAND ----------
 
