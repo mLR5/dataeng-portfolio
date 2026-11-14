@@ -82,10 +82,15 @@ jamais lire les Parquet par glob.
 
 ## Noms stables Unity Catalog
 
-Avec le widget `uc_schema` (par exemple `weather.silver`), `silver_publish`
+Avec le widget `uc_schema` (Terraform le règle à `<projet>_<env>.silver`), `silver_publish`
 appelle `register_tables` après une exécution réussie : chacune des cinq tables
 devient une table EXTERNAL `<catalogue>.<schéma>.<table>` sur son chemin Delta.
-Les lecteurs utilisent `weather.silver.<table>` et n'ont plus à connaître la racine.
+Les lecteurs utilisent `<projet>_<env>.silver.<table>` (sortie Terraform
+`databricks_silver_schema`) et n'ont plus à connaître la racine. Le catalogue
+porte le préfixe projet/environnement car le metastore régional est partagé
+par tous les workspaces : un nom `weather` nu pourrait entrer en collision.
+Terraform crée le catalogue (stockage `datalake/uc`), les schémas `silver` et
+`gold`, l'emplacement externe `datalake/gold` et les droits du principal.
 
 - Idempotent : un nom déjà enregistré au bon emplacement n'est pas touché.
 - Nouvelle racine (par exemple `silver/weatherapi` vers `silver/weatherapi_v2`) :
@@ -118,7 +123,7 @@ Tout passe par *Deploy Infrastructure* (push sur `main` ou lancement manuel).
 | Variable GitHub | Défaut | Effet |
 | --- | --- | --- |
 | `DATABRICKS_ENABLED` | `true` (défaut des workflows) | `false` ne crée rien, ou supprime ce qui existe ; `true` crée workspace serverless, Access Connector, rôles, objets Unity Catalog, notebooks et job |
-| `DATABRICKS_SILVER_PATH` | `silver/weatherapi` (production) | Racine Silver dans `datalake` ; `silver/_validation/spark` a servi à la validation |
+| `DATABRICKS_SILVER_PATH` | `silver/weatherapi_v2` (production) | Racine Silver dans `datalake` ; `silver/weatherapi` garde la v1 pour comparaison |
 | `DATABRICKS_SCHEDULE_PAUSED` | `false` (production) | `true` suspend le job quotidien de 02 h UTC |
 | `DATABRICKS_ALERT_EMAILS` | `[]` | Liste JSON d'adresses notifiées en cas d'échec ; à définir en variable GitHub (dépôt public : pas d'adresse dans le code) |
 
@@ -135,8 +140,10 @@ ADLS supplémentaires.
 
 ### Production (phase 5)
 
-Les workflows déploient la production par défaut : racine `silver/weatherapi`,
-planning actif. Le premier run remplit tout l'historique ; les suivants n'ajoutent
+Les workflows déploient la production par défaut : racine `silver/weatherapi_v2`
+(Silver v2), planning actif. La v1 reste sous `silver/weatherapi`, en lecture,
+jusqu'à la validation de la comparaison v1/v2 (`compare-silver-v1-v2.yml`, sur
+la branche `validation/silver-v2-compare`). Le premier run remplit tout l'historique ; les suivants n'ajoutent
 que les nouvelles collectes. Après 7 jours verts, supprimer `silver/_validation/spark`
 et les branches `validation/*` de cette migration.
 

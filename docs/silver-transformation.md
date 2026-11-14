@@ -2,8 +2,9 @@
 
 `transform_bronze(raw: bytes, source_blob: str)`, défini dans le notebook
 `databricks/notebooks/silver_rules.py`, transforme
-les octets exacts d'un seul JSON Bronze en deux tables Arrow, conformes aux
-schémas explicites de S1. Cette fonction est pure : elle ne lit aucun stockage,
+les octets exacts d'un seul JSON Bronze en trois tables Arrow (observations,
+prévisions horaires, prévisions quotidiennes), conformes aux schémas explicites
+de `silver_contract` (v2). Cette fonction est pure : elle ne lit aucun stockage,
 ne rappelle pas WeatherAPI et ne réalise aucune écriture Delta. Le notebook `silver_pipeline` consomme son
 `TransformResult` et assure les transactions/publications.
 
@@ -11,6 +12,11 @@ ne rappelle pas WeatherAPI et ne réalise aucune écriture Delta. Le notebook `s
 
 - `observation_snapshots` provient uniquement de `current` ; une prévision passée
   reste une prévision. Aucun trou d'observation n'est interpolé.
+- `forecast_daily_snapshots` provient de `forecastday[].day` et `astro`
+  (`silver_daily.daily_row`) ; `lead_days` est l'écart entre le jour cible et
+  le jour local de collecte dans le fuseau de la ville.
+- Un ancien JSON Bronze (`ingestion_metadata`) est d'abord converti par
+  `normalize_envelope` ; les mêmes contrôles s'appliquent ensuite.
 - Les clés incluent `ingestion_id` et `city_id`. L'observation inclut son instant
   source ; la prévision inclut son instant cible. Deux ingestions restent deux
   snapshots même si elles partagent les mêmes valeurs ou la même heure cible.
@@ -22,11 +28,14 @@ ne rappelle pas WeatherAPI et ne réalise aucune écriture Delta. Le notebook `s
   horaire UTC. Les chemins signés/URLs sont refusés comme arguments.
 - Le registre vérifie la ville demandée, le pays, les coordonnées et le fuseau.
   Les identifiants ne sont jamais créés depuis un libellé fournisseur libre.
-- La température, l'identité et l'instant sont requis. Les métriques facultatives
-  absentes restent nulles. Une valeur fournie invalide rejette sa ligne ; elle
-  n'est pas transformée silencieusement en zéro ou en null.
-- Les chaînes décimales non ambiguës sont acceptées. Les pourcentages/degrés
-  doivent être entiers ; NaN, infinis et coercition de booléens en nombres sont
+- La température, l'identité et l'instant sont requis : une valeur invalide
+  rejette la ligne (rejet `scope=row`). Les métriques facultatives absentes
+  restent nulles. Une métrique facultative fournie mais invalide devient nulle et
+  produit un rejet `scope=field` traçable ; la ligne est conservée. Rien n'est
+  transformé silencieusement en zéro.
+- Les chaînes décimales non ambiguës sont acceptées. Humidité, nuages et degrés
+  doivent être entiers ; les probabilités de pluie/neige acceptent les décimales
+  (55.80025) sans arrondi ; NaN, infinis et coercition de booléens en nombres sont
   interdits. Humidité, nuages et probabilités restent dans `[0,100]`, direction
   du vent dans `[0,360]`, vitesse/précipitations sont non négatives et la pression
   fournie doit être strictement positive. Une pression absente reste nulle.
@@ -34,9 +43,10 @@ ne rappelle pas WeatherAPI et ne réalise aucune écriture Delta. Le notebook `s
 - Les doublons internes identiques sont réduits à une ligne. Un groupe de lignes
   incompatibles pour une même clé est entièrement rejeté : la sélection ne dépend
   pas de l'ordre des lignes source.
-- Les champs météo non utilisés sont ignorés, mais leurs noms apparaissent dans
-  `summary.ignored_fields` pour suivre l'évolution de la source. Le Bronze conserve
-  leurs valeurs originales.
+- Chaque chemin du JSON Bronze a une décision documentée dans `silver_registry`
+  (conservé, ajouté, dérivable, représenté, contrôle, exclu, structurel). Un
+  chemin inconnu est listé dans `summary.unknown_paths` ; le Bronze conserve
+  toujours les valeurs originales.
 
 ## Provenance et résultats
 
@@ -51,7 +61,7 @@ avec un diagnostic fixe ; son texte ne peut pas contaminer les rejets UTF-8.
 
 | Statut | Signification |
 | --- | --- |
-| `success` | Au moins une ligne valide, aucun rejet ; les doublons identiques ne sont pas des rejets |
+| `success` | Au moins une ligne valide, aucun rejet de ligne ; les doublons identiques et les rejets `field` ne dégradent pas le statut |
 | `partial` | Des lignes valides et au moins un rejet ou une ville dont la collecte a échoué |
 | `rejected` | JSON/enveloppe incohérent, ou collecte déclarée réussie mais aucune ligne exploitable |
 | `empty` | Aucune ville collectée avec succès, motif explicite `collection_failed` |
@@ -62,7 +72,9 @@ Les erreurs d'arguments du programme ou les pannes techniques restent des
 exceptions ; elles ne deviennent pas des rejets métier terminaux.
 
 Le bilan expose `tables` et `city_tables` avec `input_rows`, `valid_rows`,
-`rejected_rows`, `duplicates_removed` et `conflicting_rows`. Pour les lignes
+`rejected_rows`, `duplicates_removed`, `conflicting_rows` et `nulled_metrics`,
+pour les trois tables. Il expose aussi `requested_horizon_days`, `bronze_format`
+et `unknown_paths`. Pour les lignes
 candidates d'une ville géographiquement validée :
 
 ```text
@@ -84,7 +96,7 @@ manquante est informative : aucune heure ni aucun septième jour ne sont invent�
 
 ```sh
 python -m pip install -r requirements-databricks.txt
-python -m pytest databricks/tests/test_rules_quality.py databricks/tests/test_rules_transform.py -o testpaths=databricks/tests
+python -m pytest databricks/tests -o testpaths=databricks/tests -k rules
 ```
 
 Les cas synthétiques vérifient les valeurs/schémas Arrow, la provenance exacte,

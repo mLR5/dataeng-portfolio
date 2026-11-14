@@ -1,8 +1,9 @@
-# Silver WeatherAPI v1 — contrats et preuve de faisabilité Delta
+# Silver WeatherAPI v2 — contrats et preuve de faisabilité Delta
 
-Contrat stabilisé pour les lots S1/S2/S3. Source : JSON Bronze déjà archivé ;
-aucun appel WeatherAPI par Silver. Deux tables Delta, sans table quotidienne
-supplémentaire. Les exemples synthétiques servent aux tests ; seules les fixtures
+Contrat v2 (modèle de données v3). Source : JSON Bronze déjà archivé ;
+aucun appel WeatherAPI par Silver. Trois tables Delta métier : observations,
+prévisions horaires et prévisions quotidiennes. La v1 (deux tables) reste lisible
+sous `silver/weatherapi` pour comparaison. Les exemples synthétiques servent aux tests ; seules les fixtures
 accompagnées d'une provenance réelle constituent des observations du fournisseur.
 
 ## Versions et interface communes
@@ -11,7 +12,11 @@ accompagnées d'une provenance réelle constituent des observations du fournisse
   schémas, clés, versions et dataclasses (section « Contrat Silver »). Il est
   chargé par `%run` dans le pipeline Spark et testé en CI ; la Function App ne
   contient plus aucun code Silver.
-- `SCHEMA_VERSION=1`, `TRANSFORM_VERSION="1.0.0"`, `SOURCE="weatherapi"`.
+- `SCHEMA_VERSION=2`, `TRANSFORM_VERSION="2.0.0"`, `SOURCE="weatherapi"`.
+- Le notebook `silver_rules.py` ne contient plus que des `%run`, dans l'ordre :
+  `silver_bronze_contract`, `silver_contract`, `silver_cities`, `silver_quality`,
+  `silver_bronze_legacy`, `silver_registry`, `silver_daily`, `silver_transform`,
+  `silver_checks`. Tous partagent un seul espace de noms.
 - Exécution : Databricks serverless. Tests : Python 3.11 Linux en CI avec
   **PyArrow 21.0.0**, PySpark et Delta Lake (`requirements-databricks.txt`).
 - `transform_bronze(raw: bytes, source_blob: str) -> TransformResult` est défini
@@ -19,8 +24,9 @@ accompagnées d'une provenance réelle constituent des observations du fournisse
 - Le pipeline (`silver_pipeline.py`) consomme `result.tables`, `TABLE_SCHEMAS`,
   `TABLE_KEYS`, `result.rejections` et `result.summary`.
 
-`TransformResult` contient les tables Arrow `observations`, `forecasts`, les
-alias `observation_snapshots`/`forecast_hourly_snapshots`, les rejets immuables,
+`TransformResult` contient les tables Arrow `observations`, `forecasts`,
+`forecasts_daily`, les alias `observation_snapshots`/`forecast_hourly_snapshots`/
+`forecast_daily_snapshots`, les rejets immuables,
 le bilan JSON, le statut, `ingestion_id`, `collected_at_utc`, `source_blob` et
 `source_sha256`. L'identité et la date peuvent être nulles si le JSON ne permet
 pas de les vérifier ; la provenance reste disponible sans ligne métier. Le
@@ -28,12 +34,13 @@ runner S3 retrouve l'identité du fichier Bronze canonique pour journaliser le
 rejet. Une exception technique reste réessayable ; elle n'est pas convertie en
 rejet de qualité.
 
-## Deux tables et leurs grains
+## Trois tables et leurs grains
 
 | Table | Grain | Clé unique |
 | --- | --- | --- |
 | `observation_snapshots` | Observation d'une ville lors d'une collecte | `ingestion_id, city_id, observed_at_utc` |
 | `forecast_hourly_snapshots` | Prévision d'une ville pour une heure cible lors d'une collecte | `ingestion_id, city_id, target_at_utc` |
+| `forecast_daily_snapshots` | Prévision d'une ville pour un jour local cible lors d'une collecte | `ingestion_id, city_id, target_local_date` |
 
 Deux collectes d'une même heure cible restent deux snapshots. Deux observations
 identiques dans des collectes distinctes restent également deux snapshots ; Gold
@@ -72,20 +79,42 @@ mais une source sans pays identifiable ne satisfait pas le registre v1.
 | `condition_code` | int32 | oui |
 | `condition_text` | string | oui |
 | `is_day` | bool | oui |
+| `uv_index`, `wind_gust_kph`, `visibility_km` (v2) | float64 | oui |
+
+La table horaire ajoute en v2 `dew_point_c`, `snowfall_cm`, `heat_index_c`,
+`wind_chill_c` et `wet_bulb_c` (float64, nullables).
+
+| Table quotidienne (en plus des colonnes communes) | Type | Null autorisé |
+| --- | --- | --- |
+| `target_local_date` | date32 | non |
+| `lead_days` | int16, jour cible moins jour local de collecte | non |
+| `temperature_min_c`, `temperature_max_c`, `temperature_avg_c`, `wind_max_kph`, `precipitation_total_mm`, `snowfall_total_cm`, `visibility_avg_km`, `humidity_avg_pct`, `chance_of_rain_pct`, `chance_of_snow_pct`, `uv_index`, `wet_bulb_avg_c`, `wet_bulb_max_c` | float64 | oui |
+| `will_it_rain`, `will_it_snow` | bool | oui |
+| `condition_code` | int32 | oui |
+| `condition_text`, `sunrise_local`, `sunset_local` | string | oui |
+| `sunrise_utc`, `sunset_utc` | timestamp(us, UTC) | oui |
+
+Lever et coucher : le texte local source (`08:10 AM`) est conservé et l'instant
+UTC est calculé avec le fuseau IANA du registre. Un évènement qui n'a pas lieu
+(`No sunrise`) est nul sans rejet ; une heure locale inexistante ou ambiguë
+annule seulement l'instant UTC. Les champs lunaires sont exclus.
 
 Observation : `observed_at_utc` non nullable, issu en priorité de
 `current.last_updated_epoch`. Prévision : `target_at_utc` (epoch source),
 `target_local_date`, `lead_time_hours` (float64),
 `target_is_past_at_collection` (bool), tous non nullables ;
-`chance_of_rain_pct` et `chance_of_snow_pct` (int16) nullables.
+`chance_of_rain_pct` et `chance_of_snow_pct` (float64 en v2, décimales permises,
+jamais arrondies) nullables.
 
-Les choix de champs obligatoires sont des **règles du contrat v1**, pas une
+Les choix de champs obligatoires sont des **règles du contrat**, pas une
 promesse de non-nullabilité de WeatherAPI. Les deux captures réelles des 17 et 18 octobre 2026 confirment
 les types et valeurs des champs consommés, sans démontrer toutes les variantes
-futures. Le profil complet versionné indique les nulls et fréquences observés. Une métrique facultative absente devient null ; une métrique
-présente mais invalide entraîne un rejet explicite. Une chaîne numérique peut
+futures. Le profil complet versionné indique les nulls et fréquences observés. Une métrique facultative absente devient null. En v2, une métrique
+facultative présente mais invalide devient null et produit un rejet de portée
+`field` (la ligne est conservée) ; identité, ville, instants et `temperature_c`
+restent bloquants (rejet de portée `row`). Une chaîne numérique peut
 être convertie si elle est non ambiguë ; booléens comme nombres, NaN, infinis,
-valeurs vides et fractions pour champs entiers sont refusés. Humidité/chances et
+valeurs vides et fractions pour champs entiers sont refusés. Humidité/chances (décimales permises) et
 nuages : [0,100] ; degrés : [0,360] ; pression >0 ; pluie et vent >=0.
 Pas de valeur météo zéro inventée et pas d'interpolation en Silver.
 
@@ -113,22 +142,31 @@ inventer ni appliquer la configuration actuelle aux historiques.
 
 | Statut | Signification |
 | --- | --- |
-| `success` | Au moins une ligne, villes/sections attendues valides, aucun rejet |
+| `success` | Au moins une ligne, villes/sections attendues valides, aucun rejet de ligne (des rejets `field` sont permis) |
 | `partial` | Au moins une ligne valide et des sections/villes/lignes manquantes ou rejetées |
 | `rejected` | Aucune ligne valide, JSON/enveloppe invalide ou données métier inexploitable |
 | `empty` | Aucune ligne, collecte explicitement sans succès ; `summary.reason=collection_failed` |
 
-`Rejection(table, code, city_query, position, field, message)` est sérialisable
+`Rejection(table, code, city_query, position, field, message, scope)` est sérialisable
 par `to_dict()`. Les champs sont strings ou null, jamais une exception SDK ni
 une copie de charge brute. Le writer ajoute identité, chemin et empreinte à
 chaque diagnostic. Les codes incluent `invalid_json`, `invalid_envelope`,
 `summary_mismatch`, `source_path_mismatch`, `unknown_city`, `location_mismatch`,
 `missing_field`, `invalid_type`, `invalid_timestamp`, `out_of_range`,
-`duplicate_conflict`, `ambiguous_local_time`, `nonexistent_local_time`.
+`duplicate_conflict`, `ambiguous_local_time`, `nonexistent_local_time`,
+`invalid_time`. `scope` vaut `row` (ligne retirée) ou `field` (une mesure
+facultative annulée, ligne conservée).
 
 Le résultat conserve provenance et versions ; le bilan S2 reste JSON-safe et décrit les villes demandées,
-succès/échecs de collecte, tables et compteurs par ville, horizons, champs
-ignorés et nombre de rejets. Les compteurs par table distinguent `input_rows`,
+succès/échecs de collecte, tables et compteurs par ville, horizons, nombre de
+rejets, `nulled_metrics` (rejets `field`), `requested_horizon_days`,
+`bronze_format` (`current` ou `legacy`) et `unknown_paths`.
+
+**Registre de non-omission** (`silver_registry`) : chaque chemin scalaire du
+JSON Bronze a une décision (`kept`, `added`, `derivable`, `represented`,
+`control`, `excluded`, `structural`). Un chemin inconnu apparaît dans
+`unknown_paths` et la publication (`unknown_path_count`) : c'est une alerte,
+pas une évolution de schéma automatique. Il remplace `ignored_fields`. Les compteurs par table distinguent `input_rows`,
 `valid_rows`, `rejected_rows`, `duplicates_removed` et `conflicting_rows`.
 Des doublons identiques sont réduits ; toutes les lignes d'un groupe de même
 clé avec contenu incompatible sont rejetées. Un total de rejets n'est pas un
@@ -136,7 +174,10 @@ total de lignes car un diagnostic peut concerner une section complète.
 
 ## Stockage et barrière de publication
 
-Deux tables Delta communes aux ingestions sous `datalake/silver/weatherapi/`.
+Trois tables Delta métier communes aux ingestions sous
+`datalake/silver/weatherapi_v2/` (la v1 reste sous `silver/weatherapi/`).
+Les lecteurs utilisent les noms Unity Catalog stables
+`<projet>_<env>.silver.<table>` enregistrés par le job.
 Les versions de schéma et de transformation sont des colonnes de chaque ligne,
 pas des dossiers. Pas de partition
 physique initiale et pas de table Delta par ingestion. Ne jamais écrire dans
@@ -146,12 +187,21 @@ l'évolution de schéma, le compactage ou `VACUUM`.
 Le moteur testé crée des tables avec **minReaderVersion=1 et
 minWriterVersion=2**, sans fonctionnalité Delta avancée. Les types et la
 nullabilité reviennent identiques après relecture Delta/PyArrow en test local.
-Une publication S3 immuable référence les versions des **deux** tables après
+Une publication S3 immuable référence les versions des **trois** tables après
 leurs transactions et l'écriture des rejets. Delta n'a pas de transaction
-commune aux deux tables. Gold fige les publications achevées et les versions,
+commune aux tables. Gold fige les publications achevées et les versions,
 puis filtre leurs identifiants ; il ignore les ingestions partiellement écrites.
 Une modification du résultat impose une nouvelle version de transformation et
-un préfixe séparé.
+une racine séparée.
+
+## Ancien format Bronze
+
+Vingt archives historiques utilisent une enveloppe `ingestion_metadata` /
+`metadata` / `raw_data`, rejetée par la v1 (`invalid_ingestion_id`).
+`normalize_envelope` (`silver_bronze_legacy`) les convertit vers l'enveloppe
+courante sans inventer d'identité ni d'horodatage ; la réponse WeatherAPI reste
+intacte et passe les mêmes contrôles (Londres résolue en Argentine reste
+rejetée). La publication porte `bronze_format=legacy`.
 
 ## Fixtures réelles et anomalie fournisseur confirmée
 
