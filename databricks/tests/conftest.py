@@ -50,6 +50,8 @@ def load_notebook(name):
 # Library notebooks are importable by tests: ``from silver_rules import transform_bronze``.
 silver_rules = load_notebook("silver_rules")
 silver_pipeline = load_notebook("silver_pipeline")
+silver_reconciliation = load_notebook("silver_reconciliation")
+silver_audit = load_notebook("silver_audit")
 
 
 def _session(with_delta):

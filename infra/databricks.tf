@@ -59,7 +59,7 @@ locals {
   bronze_root         = "abfss://bronze@${module.storage.name}.dfs.core.windows.net"
   silver_root         = "abfss://datalake@${module.storage.name}.dfs.core.windows.net/${var.databricks_silver_path}"
   silver_notebook_dir = "/Shared/weather-silver"
-  silver_notebooks    = var.databricks_enabled ? toset(["silver_rules", "silver_pipeline", "silver_publish", "silver_freshness", "silver_explore"]) : toset([])
+  silver_notebooks    = var.databricks_enabled ? toset(["silver_rules", "silver_pipeline", "silver_publish", "silver_freshness", "silver_explore", "silver_reconciliation", "silver_audit", "silver_check"]) : toset([])
 }
 
 # --- Azure ------------------------------------------------------------------

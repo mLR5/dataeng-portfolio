@@ -14,6 +14,9 @@ Infrastructure* existant.
 | `silver_publish` | Tâche 1 du job : widgets, puis publication des ingestions en attente |
 | `silver_freshness` | Tâche 2 du job : échoue si la dernière collecte publiée a plus de 26 h ou si les 24 dernières heures comptent moins de 20 publications |
 | `silver_explore` | Lecture seule : publications par jour et statut, rejets fréquents, prévisions lues comme Gold |
+| `silver_reconciliation` | Bibliothèque de recomptage Bronze et comparaison exacte avec Silver |
+| `silver_audit` | Audit historique en lecture seule, versions Delta figées et lecture par lots |
+| `silver_check` | Contrôle manuel de non-perte avec rapport et échec sur anomalie |
 
 Ils sont publiés dans le workspace sous `/Shared/weather-silver/`. Le job
 `silver-weatherapi` enchaîne `silver_publish` puis `silver_freshness` sur compute
@@ -61,6 +64,10 @@ fait à cette version (`versionAsOf`) avec un filtre sur ces IDs. Ne jamais lire
 Parquet par glob.
 
 ## Tests
+
+Pour contrôler l'absence de pertes inexpliquées sur les données déployées,
+voir [la réconciliation Bronze → Silver](bronze-silver-reconciliation.md).
+Le notebook `silver_check` est déployé sans ajouter de tâche au job quotidien.
 
 ```sh
 pip install -r requirements-databricks.txt
