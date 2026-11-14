@@ -10,7 +10,7 @@ variable "databricks_enabled" {
 }
 
 variable "databricks_silver_path" {
-  description = "Silver root inside the datalake container: silver/weatherapi in production (set by the workflows)."
+  description = "Silver root inside the datalake container: silver/weatherapi_v2 in production (set by the workflows); the v1 root silver/weatherapi stays on storage for the comparison."
   type        = string
   default     = "silver/_validation/spark"
 
@@ -54,12 +54,22 @@ variable "databricks_tenant_id" {
 locals {
   databricks_count = var.databricks_enabled ? 1 : 0
   # Metastore-level names are shared by every workspace of the region.
-  databricks_prefix   = "${var.project_name}-${var.environment}"
+  databricks_prefix = "${var.project_name}-${var.environment}"
+  # Unity Catalog catalog: same per-project/environment scoping as the names above (a
+  # plain "weather" would collide between two environments in one region). Hyphens are
+  # not valid in unquoted identifiers, hence the sanitising.
+  databricks_catalog  = replace(lower("${var.project_name}_${var.environment}"), "/[^a-z0-9_]/", "_")
+  datalake_root       = "abfss://datalake@${module.storage.name}.dfs.core.windows.net"
+  catalog_root        = "${local.datalake_root}/uc"
   databricks_url      = var.databricks_enabled ? "https://${azapi_resource.databricks_workspace[0].output.properties.workspaceUrl}" : null
   bronze_root         = "abfss://bronze@${module.storage.name}.dfs.core.windows.net"
-  silver_root         = "abfss://datalake@${module.storage.name}.dfs.core.windows.net/${var.databricks_silver_path}"
+  silver_root         = "${local.datalake_root}/${var.databricks_silver_path}"
   silver_notebook_dir = "/Shared/weather-silver"
-  silver_notebooks    = var.databricks_enabled ? toset(["silver_rules", "silver_pipeline", "silver_publish", "silver_freshness", "silver_explore"]) : toset([])
+  silver_notebooks    = var.databricks_enabled ? toset([
+    "silver_rules", "silver_bronze_contract", "silver_contract", "silver_cities", "silver_quality",
+    "silver_bronze_legacy", "silver_registry", "silver_daily", "silver_transform", "silver_checks",
+    "silver_pipeline", "silver_publish", "silver_freshness", "silver_explore",
+  ]) : toset([])
 }
 
 # --- Azure ------------------------------------------------------------------
@@ -154,7 +164,7 @@ resource "databricks_external_location" "bronze" {
 resource "databricks_external_location" "silver" {
   count           = local.databricks_count
   name            = "${local.databricks_prefix}-silver"
-  url             = "abfss://datalake@${module.storage.name}.dfs.core.windows.net/silver"
+  url             = "${local.datalake_root}/silver"
   credential_name = databricks_storage_credential.adls[0].name
   skip_validation = true
   comment         = "Silver Delta tables and their _control tables, validation roots included"
@@ -170,12 +180,96 @@ resource "databricks_grants" "bronze" {
   }
 }
 
+# CREATE_EXTERNAL_TABLE: the publication registers the Silver tables in Unity Catalog.
 resource "databricks_grants" "silver" {
   count             = local.databricks_count
   external_location = databricks_external_location.silver[0].id
   grant {
     principal  = var.databricks_client_id
-    privileges = ["READ_FILES", "WRITE_FILES"]
+    privileges = ["CREATE_EXTERNAL_TABLE", "READ_FILES", "WRITE_FILES"]
+  }
+}
+
+# Gold tables, written beside Silver in the same container (Contributor role above).
+# Sibling paths: Unity Catalog refuses overlapping external locations.
+resource "databricks_external_location" "gold" {
+  count           = local.databricks_count
+  name            = "${local.databricks_prefix}-gold"
+  url             = "${local.datalake_root}/gold"
+  credential_name = databricks_storage_credential.adls[0].name
+  skip_validation = true
+  comment         = "Gold Delta tables"
+  depends_on      = [azurerm_role_assignment.databricks_datalake_contributor, azurerm_role_assignment.databricks_blob_delegator]
+}
+
+resource "databricks_grants" "gold" {
+  count             = local.databricks_count
+  external_location = databricks_external_location.gold[0].id
+  grant {
+    principal  = var.databricks_client_id
+    privileges = ["CREATE_EXTERNAL_TABLE", "READ_FILES", "WRITE_FILES"]
+  }
+}
+
+# Managed storage of the catalog: the regional metastore created automatically has no
+# metastore-level storage, so a catalog must name one. Only Unity Catalog metadata of
+# managed objects lives here; Silver and Gold tables are external (their files stay in
+# silver/ and gold/, never deleted by a DROP TABLE).
+resource "databricks_external_location" "catalog" {
+  count           = local.databricks_count
+  name            = "${local.databricks_prefix}-catalog"
+  url             = local.catalog_root
+  credential_name = databricks_storage_credential.adls[0].name
+  skip_validation = true
+  comment         = "Managed storage of the ${local.databricks_catalog} catalog"
+  depends_on      = [azurerm_role_assignment.databricks_datalake_contributor, azurerm_role_assignment.databricks_blob_delegator]
+}
+
+resource "databricks_grants" "catalog_storage" {
+  count             = local.databricks_count
+  external_location = databricks_external_location.catalog[0].id
+  grant {
+    principal  = var.databricks_client_id
+    privileges = ["CREATE_MANAGED_STORAGE"]
+  }
+}
+
+# Stable names for readers: <catalog>.silver.<table> instead of abfss paths.
+# force_destroy stays false: a catalog or schema that still holds tables is never
+# dropped by Terraform (DATABRICKS_ENABLED=false then fails visibly instead).
+# Changing storage_root replaces the catalog: a constant, not a server-normalised URL.
+resource "databricks_catalog" "weather" {
+  count         = local.databricks_count
+  name          = local.databricks_catalog
+  storage_root  = local.catalog_root
+  comment       = "Weather pipeline: Silver and Gold tables (external Delta tables)"
+  force_destroy = false
+  depends_on    = [databricks_grants.catalog_storage]
+}
+
+resource "databricks_schema" "silver" {
+  count         = local.databricks_count
+  catalog_name  = databricks_catalog.weather[0].name
+  name          = "silver"
+  comment       = "Silver WeatherAPI tables, registered by the silver-weatherapi job"
+  force_destroy = false
+}
+
+resource "databricks_schema" "gold" {
+  count         = local.databricks_count
+  catalog_name  = databricks_catalog.weather[0].name
+  name          = "gold"
+  comment       = "Gold tables built from published Silver ingestions"
+  force_destroy = false
+}
+
+# Granted once on the catalog, inherited by both schemas and their tables.
+resource "databricks_grants" "catalog" {
+  count   = local.databricks_count
+  catalog = databricks_catalog.weather[0].name
+  grant {
+    principal  = var.databricks_client_id
+    privileges = ["CREATE_TABLE", "MODIFY", "SELECT", "USE_CATALOG", "USE_SCHEMA"]
   }
 }
 
@@ -241,11 +335,17 @@ resource "databricks_job" "silver" {
         # Nightly listing limited to the last 3 UTC days; whole Bronze on Sundays.
         lookback_days     = "3"
         full_scan_weekday = "6"
+        # Registers the tables as external tables of this schema after publication.
+        uc_schema = "${databricks_catalog.weather[0].name}.${databricks_schema.silver[0].name}"
       }
     }
   }
 
-  depends_on = [databricks_grants.bronze, databricks_grants.silver, databricks_notebook.silver]
+  # Every grant exists before the first run: a missing privilege fails the task visibly.
+  depends_on = [
+    databricks_grants.bronze, databricks_grants.silver, databricks_grants.gold,
+    databricks_grants.catalog, databricks_schema.silver, databricks_notebook.silver,
+  ]
 }
 
 output "databricks_workspace_url" {
@@ -260,4 +360,9 @@ output "databricks_silver_job_id" {
 
 output "databricks_silver_root" {
   value = var.databricks_enabled ? local.silver_root : null
+}
+
+output "databricks_silver_schema" {
+  description = "Unity Catalog schema of the Silver tables (<catalog>.silver)"
+  value       = var.databricks_enabled ? "${databricks_catalog.weather[0].name}.${databricks_schema.silver[0].name}" : null
 }

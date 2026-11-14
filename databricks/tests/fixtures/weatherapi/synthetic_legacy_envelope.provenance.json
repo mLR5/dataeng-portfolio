@@ -1,0 +1,13 @@
+{
+  "kind": "synthetic",
+  "description": "Handcrafted legacy Bronze envelope (ingestion_metadata / metadata / raw_data) reproducing the key paths and types of the 20 historical archives of 2026-01-19/20 (structure read by a read-only workflow that printed paths, types and non-sensitive scalars only). Every value is artificial; URL, host and endpoint fields hold placeholders, never real values. Never fetched from WeatherAPI or Bronze.",
+  "structure_source_run": "https://github.com/mLR5/dataeng-portfolio/actions/runs/43652379082",
+  "derived_sha256": "e67fb02d2383ea08bab0852057c6fddf97cf0fb9f875909d2796bb621181e994",
+  "source_blob": "weather/weatherapi/2026/01/19/12/20260119_120000_weather_data.json",
+  "reduction": "Three forecast days with two hours each (real archives: 16 to 24 hours per day).",
+  "expected_status": "partial",
+  "expected_bronze_format": "legacy",
+  "expected_observations": 1,
+  "expected_forecasts": 6,
+  "expected_rejection_codes": {"location_mismatch": 1, "collection_failed": 1}
+}

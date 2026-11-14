@@ -7,6 +7,12 @@
   per day; JSON formatting also changed. No other values were corrected.
 - Adjacent `.provenance.json` files distinguish the original blob hash from the
   derived fixture hash and record exact reduction, source, run and expectations.
+- `synthetic_daily_paris.json` (Silver v2) holds handcrafted `forecastday`
+  fragments (`day` + `astro`, no `hour`) around the 2026 DST changes; it is not
+  a Bronze envelope.
+- `synthetic_legacy_envelope.json` (Silver v2) reproduces the structure of the
+  20 historical `ingestion_metadata` archives with invented values and
+  placeholders instead of URLs, hosts or keys.
 - `real_bronze_profiles.json` describes the complete original responses before
   reduction (types, nulls, cardinalities, hashes and source paths).
 
