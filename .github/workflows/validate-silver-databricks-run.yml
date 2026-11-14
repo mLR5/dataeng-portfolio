@@ -1,4 +1,4 @@
-name: Validate the Silver Databricks job (phase 5, production root)
+name: Validate the Silver Databricks job (phase v2, production root)
 
 # Isolated branch, phase 4 of ADR 0001: runs the deployed job twice on the
 # validation root, then reads the Delta tables directly in ADLS to check that
@@ -18,13 +18,13 @@ concurrency:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     environment: dev
     env:
       PROJECT: ${{ secrets.TF_VAR_PROJECT_NAME }}
       ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
       ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
-      SILVER_PATH: silver/weatherapi
+      SILVER_PATH: silver/weatherapi_v2
     steps:
       - uses: azure/login@v2
         with:
@@ -77,7 +77,7 @@ jobs:
           bronze = {n.rsplit("/", 1)[1].removesuffix("_weather_data.json") for n in names if canonical.fullmatch(n)}
           report = {"bronze_canonical": len(bronze), "bronze_listed": len(names)}
           tables = {"observation_snapshots": "observation_snapshots", "forecast_hourly_snapshots": "forecast_hourly_snapshots",
-                    "publications": "_control/publications", "quarantine": "_control/quarantine"}
+                    "forecast_daily_snapshots": "forecast_daily_snapshots", "publications": "_control/publications", "quarantine": "_control/quarantine"}
           for name, sub in tables.items():
               try:
                   table = DeltaTable(f"{root}/{sub}", storage_options=options)
@@ -95,9 +95,19 @@ jobs:
                   info["unknown_ids"] = len(set(ids) - bronze)
                   collected = [v for v in data.column("collected_at_utc").to_pylist() if v]
                   info["collected_range"] = [str(min(collected)), str(max(collected))] if collected else None
+                  info["bronze_formats"] = dict(Counter(data.column("bronze_format").to_pylist()))
+                  info["nulled_metrics_sum"] = sum(v or 0 for v in data.column("nulled_metrics").to_pylist())
+                  info["unknown_path_count_sum"] = sum(v or 0 for v in data.column("unknown_path_count").to_pylist())
+                  info["forecast_daily_row_count_sum"] = sum(v or 0 for v in data.column("forecast_daily_row_count").to_pylist())
+                  # Usable publications with hourly forecasts but no daily forecast row.
+                  info["usable_without_daily"] = sum(
+                      1 for s, d, h in zip(data.column("status").to_pylist(), data.column("forecast_daily_row_count").to_pylist(),
+                                           data.column("forecast_row_count").to_pylist())
+                      if s in ("success", "partial") and not ((d or 0) > 0 or (h or 0) == 0))
               if name == "quarantine":
                   info["codes"] = dict(Counter(data.column("code").to_pylist()).most_common(8))
-              if name in ("observation_snapshots", "forecast_hourly_snapshots"):
+                  info["scopes"] = dict(Counter(data.column("scope").to_pylist()))
+              if name in ("observation_snapshots", "forecast_hourly_snapshots", "forecast_daily_snapshots"):
                   info["cities"] = dict(Counter(data.column("city_id").to_pylist()))
               report[name] = info
           print(json.dumps(report, indent=2, sort_keys=True, default=str))
@@ -161,6 +171,9 @@ jobs:
               "replay published only the archives missing before it": (
                   pb["rows"] - pa["rows"] == pa["missing_bronze"] + arrived - pb["missing_bronze"]),
               "quarantine never shrinks": b["quarantine"]["rows"] >= a["quarantine"]["rows"],
+              "no unknown Bronze path (sum of unknown_path_count == 0)": pb["unknown_path_count_sum"] == 0,
+              "20 legacy Bronze archives": pb["bronze_formats"].get("legacy", 0) == 20,
+              "every success/partial publication has daily rows or no hourly rows": pb["usable_without_daily"] == 0,
           }
           for name, ok in checks.items():
               print(("PASS " if ok else "FAIL ") + name)
@@ -177,3 +190,17 @@ jobs:
             statement: "SELECT usage_date, sku_name, SUM(usage_quantity) AS dbu FROM system.billing.usage WHERE usage_metadata.job_id = :job GROUP BY ALL ORDER BY usage_date",
             parameters: [{name: "job", value: $job}]}')
           databricks api post /api/2.0/sql/statements --json "$body" | jq '{status: .status.state, error: .status.error.message, rows: .result.data_array}'
+
+      - name: Unity Catalog names
+        if: always()
+        continue-on-error: true
+        run: |
+          catalog=$(echo "${PROJECT}_${ENVIRONMENT}" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_]/_/g')
+          wh=$(databricks warehouses list -o json | jq -r '.[0].id // empty')
+          if [ -n "$wh" ]; then
+            body=$(jq -n --arg wh "$wh" --arg s "SHOW TABLES IN ${catalog}.silver" '{warehouse_id: $wh, wait_timeout: "50s", statement: $s}')
+            databricks api post /api/2.0/sql/statements --json "$body" | jq '{status: .status.state, error: .status.error.message, rows: .result.data_array}'
+          else
+            echo "No SQL warehouse: listing with the Unity Catalog API."
+            databricks tables list "$catalog" silver -o json | jq '[.[]|{name,table_type,storage_location}]'
+          fi
