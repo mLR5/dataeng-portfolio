@@ -7,6 +7,11 @@
 # MAGIC Only ``current`` produces observations. Forecast snapshots remain forecasts even
 # MAGIC when their target time precedes collection. Identity includes the ingestion, so
 # MAGIC separate collections never overwrite one another in this layer.
+# MAGIC
+# MAGIC v2 : une mesure optionnelle invalide devient NULL et produit une rejection de
+# MAGIC portée `field` (la ligne est conservée) ; l'identité, la ville, les instants et
+# MAGIC `temperature_c` restent bloquants (portée `row`). Chaque `forecastday` à date
+# MAGIC locale valide produit une ligne `forecast_daily_snapshots` (voir silver_daily).
 
 # COMMAND ----------
 
@@ -24,7 +29,7 @@ import pyarrow as pa
 def _json_object(pairs):
     result = {}
     for key, value in pairs:
-        # Unknown provider keys can later appear in summary.ignored_fields.
+        # Keys must be valid Unicode: unknown paths are reported in summary.unknown_paths.
         key.encode("utf-8")
         if key in result:
             raise ValueError("Duplicate JSON object key")
@@ -53,30 +58,70 @@ def _safe_source_blob(source_blob):
         raise ValueError("source_blob must be a valid Unicode relative blob path") from None
 
 
-def _weather(row):
+# Optional measures beyond the v1 weather fields: (column, Bronze key, number() rules).
+_OBSERVATION_EXTRA_MEASURES = (
+    ("uv_index", "uv", {"minimum": 0}),
+    ("wind_gust_kph", "gust_kph", {"minimum": 0}),
+    ("visibility_km", "vis_km", {"minimum": 0}),
+)
+_FORECAST_EXTRA_MEASURES = (
+    # v2: decimal probabilities are kept as supplied (55.80025 is valid), never rounded.
+    ("chance_of_rain_pct", "chance_of_rain", {"minimum": 0, "maximum": 100}),
+    ("chance_of_snow_pct", "chance_of_snow", {"minimum": 0, "maximum": 100}),
+) + _OBSERVATION_EXTRA_MEASURES + (
+    ("dew_point_c", "dewpoint_c", {}),
+    ("snowfall_cm", "snow_cm", {"minimum": 0}),
+    ("heat_index_c", "heatindex_c", {}),
+    ("wind_chill_c", "windchill_c", {}),
+    ("wet_bulb_c", "wetbulb_c", {}),
+)
+
+
+def _weather_pressure(value):
+    pressure = number(value, "pressure_mb", minimum=0)
+    if pressure == 0:
+        raise QualityError("out_of_range", "pressure_mb", "Pressure must be strictly positive when supplied")
+    return pressure
+
+
+def _weather(row, extra_measures=()):
+    """Return ``(metrics, nulled)`` for one ``current`` or ``hour[]`` object.
+
+    A non-object row and an invalid or missing ``temp_c`` raise QualityError (the
+    row is rejected). Any other invalid supplied measure becomes None and its
+    QualityError is appended to ``nulled`` (field-level rejection, row kept).
+    """
     if not isinstance(row, dict):
         raise QualityError("invalid_type", None, "Weather row must be an object")
+    temperature = number(row.get("temp_c"), "temp_c", required=True)
+    nulled = []
+
+    def measure(key, **rules):
+        return lenient(nulled, lambda: number(row.get(key), key, **rules))
+
     condition = row.get("condition")
     if condition is None:
         condition = {}
     if not isinstance(condition, dict):
-        raise QualityError("invalid_type", "condition", "Condition must be an object")
+        nulled.append(QualityError("invalid_type", "condition", "Condition must be an object"))
+        condition = {}
     metrics = {
-        "temperature_c": number(row.get("temp_c"), "temp_c", required=True),
-        "feels_like_c": number(row.get("feelslike_c"), "feelslike_c"),
-        "humidity_pct": number(row.get("humidity"), "humidity", integer=True, minimum=0, maximum=100),
-        "pressure_mb": number(row.get("pressure_mb"), "pressure_mb", minimum=0),
-        "wind_kph": number(row.get("wind_kph"), "wind_kph", minimum=0),
-        "wind_degree": number(row.get("wind_degree"), "wind_degree", integer=True, minimum=0, maximum=360),
-        "precipitation_mm": number(row.get("precip_mm"), "precip_mm", minimum=0),
-        "cloud_pct": number(row.get("cloud"), "cloud", integer=True, minimum=0, maximum=100),
-        "condition_code": number(condition.get("code"), "condition.code", integer=True, minimum=0, maximum=2**31 - 1),
-        "condition_text": optional_text(condition.get("text"), "condition.text"),
-        "is_day": boolean(row.get("is_day"), "is_day"),
+        "temperature_c": temperature,
+        "feels_like_c": measure("feelslike_c"),
+        "humidity_pct": measure("humidity", integer=True, minimum=0, maximum=100),
+        "pressure_mb": lenient(nulled, lambda: _weather_pressure(row.get("pressure_mb"))),
+        "wind_kph": measure("wind_kph", minimum=0),
+        "wind_degree": measure("wind_degree", integer=True, minimum=0, maximum=360),
+        "precipitation_mm": measure("precip_mm", minimum=0),
+        "cloud_pct": measure("cloud", integer=True, minimum=0, maximum=100),
+        "condition_code": lenient(nulled, lambda: number(
+            condition.get("code"), "condition.code", integer=True, minimum=0, maximum=2**31 - 1)),
+        "condition_text": lenient(nulled, lambda: optional_text(condition.get("text"), "condition.text")),
+        "is_day": lenient(nulled, lambda: boolean(row.get("is_day"), "is_day")),
     }
-    if metrics["pressure_mb"] == 0:
-        raise QualityError("out_of_range", "pressure_mb", "Pressure must be strictly positive when supplied")
-    return metrics
+    for column, key, rules in extra_measures:
+        metrics[column] = measure(key, **rules)
+    return metrics, nulled
 
 
 def _envelope(data, source_blob):
@@ -144,6 +189,30 @@ def _deduplicate(candidates, keys, table_name, rejections, counts, city_counts):
     return accepted
 
 
+def _accepted_field_rejections(pending, accepted, keys, rejections, counts, city_counts, table_name):
+    """Record field rejections only for rows kept after deduplication.
+
+    ``pending`` holds (row, nulled QualityErrors, city_query, position). A row lost
+    to a duplicate conflict already has its row rejection: nulling one of its
+    measures is then not reported as if the row had been kept.
+    """
+    kept = {tuple(row[key] for key in keys) for row in accepted}
+    for row, nulled, query, position in pending:
+        if tuple(row[key] for key in keys) not in kept:
+            continue
+        for error in nulled:
+            rejections.append(Rejection(table_name, error.code, query, position, error.field,
+                                        str(error), scope="field"))
+            counts["nulled_metrics"] += 1
+            city_counts[row["city_id"]][table_name]["nulled_metrics"] += 1
+
+
+def _requested_horizon_days(data):
+    request = data.get("forecast_request") if isinstance(data, dict) else None
+    days = request.get("days") if isinstance(request, dict) else None
+    return days if type(days) is int else None
+
+
 def _coverage(city, days, raw_hours, valid_rows):
     zone = ZoneInfo(city.timezone)
     targets = {row["target_at_utc"] for row in valid_rows}
@@ -180,18 +249,24 @@ def transform_bronze(raw: bytes, source_blob: str) -> TransformResult:
     ingestion_id = _path_id(source_blob)
     collected = None
     rejections = []
-    candidates = {OBSERVATION_TABLE: [], FORECAST_TABLE: []}
+    candidates = {OBSERVATION_TABLE: [], FORECAST_TABLE: [], FORECAST_DAILY_TABLE: []}
+    # (row, nulled errors, city_query, position): field rejections wait for deduplication.
+    pending_fields = {table: [] for table in candidates}
     summary = {
         "tables": {table: {"input_rows": 0, "valid_rows": 0, "rejected_rows": 0,
-                           "duplicates_removed": 0, "conflicting_rows": 0}
+                           "duplicates_removed": 0, "conflicting_rows": 0, "nulled_metrics": 0}
                    for table in candidates},
         "cities": {"requested": [], "collection_successful": [], "collection_failed": [],
-                   "with_valid_observations": [], "with_valid_forecasts": []},
-        "horizons": {}, "ignored_fields": {}, "city_tables": {},
+                   "with_valid_observations": [], "with_valid_forecasts": [], "with_valid_daily": []},
+        "horizons": {}, "city_tables": {}, "requested_horizon_days": None, "nulled_metrics": 0,
     }
 
     def reject(table, error, query=None, position=None):
         rejections.append(Rejection(table, error.code, query, position, error.field, str(error)))
+
+    def candidate(table, row, nulled, query, position):
+        candidates[table].append((row, query, position))
+        pending_fields[table].append((row, nulled, query, position))
 
     def result(observations=(), forecasts=(), status="rejected", reason=None, daily=()):
         summary["rejection_count"] = len(rejections)
@@ -214,6 +289,7 @@ def transform_bronze(raw: bytes, source_blob: str) -> TransformResult:
     # v2: the historical envelope is converted, then checked like the current one.
     data, summary["bronze_format"] = normalize_envelope(data)
     summary["unknown_paths"] = unknown_paths(data) if isinstance(data, dict) else []
+    summary["requested_horizon_days"] = _requested_horizon_days(data)
     # Preserve trustworthy metadata on a rejected envelope without inventing it.
     if isinstance(data, dict):
         possible_id = data.get("ingestion_id")
@@ -232,7 +308,6 @@ def transform_bronze(raw: bytes, source_blob: str) -> TransformResult:
         return result(reason=error.code)
     summary["collection"] = collection_counts
     city_horizons = {}
-    ignored = defaultdict(set)
 
     for city_position, entry in enumerate(cities):
         query = entry["city"]
@@ -274,13 +349,10 @@ def transform_bronze(raw: bytes, source_blob: str) -> TransformResult:
         city_counts[OBSERVATION_TABLE]["input_rows"] += 1
         current = payload.get("current")
         try:
-            metrics = _weather(current)
+            metrics, nulled = _weather(current, _OBSERVATION_EXTRA_MEASURES)
             observed_at = instant(current, "last_updated_epoch", "last_updated", city.timezone)
-            candidates[OBSERVATION_TABLE].append((
-                {**common, "observed_at_utc": observed_at, **metrics}, query, f"{prefix}.current"))
-            ignored["current"].update(set(current) - {
-                "last_updated_epoch", "last_updated", "temp_c", "feelslike_c", "humidity", "pressure_mb",
-                "wind_kph", "wind_degree", "precip_mm", "cloud", "condition", "is_day"})
+            candidate(OBSERVATION_TABLE, {**common, "observed_at_utc": observed_at, **metrics},
+                      nulled, query, f"{prefix}.current")
         except QualityError as error:
             observation_counts["rejected_rows"] += 1
             city_counts[OBSERVATION_TABLE]["rejected_rows"] += 1
@@ -295,7 +367,7 @@ def transform_bronze(raw: bytes, source_blob: str) -> TransformResult:
         horizon = city_horizons.setdefault(city.city_id, {"city": city, "days": set(), "raw_hours": 0})
         for day_position, forecastday in enumerate(forecastdays):
             day_prefix = f"{prefix}.forecast.forecastday[{day_position}]"
-            if not isinstance(forecastday, dict) or not isinstance(forecastday.get("hour"), list):
+            if not isinstance(forecastday, dict):
                 reject(FORECAST_TABLE, QualityError("invalid_forecast", "hour", "Forecast day must contain an hour list"), query, day_prefix)
                 continue
             day_error = None
@@ -306,10 +378,28 @@ def transform_bronze(raw: bytes, source_blob: str) -> TransformResult:
                 local_day = date.fromisoformat(day_value)
                 # Coverage needs both midnight boundaries of the local day.
                 local_day + timedelta(days=1)
-                horizon["days"].add(local_day)
             except (ValueError, OverflowError):
                 local_day = None
                 day_error = QualityError("invalid_date", "date", "Forecast day needs a valid local calendar date")
+            daily_counts = summary["tables"][FORECAST_DAILY_TABLE]
+            daily_counts["input_rows"] += 1
+            city_counts[FORECAST_DAILY_TABLE]["input_rows"] += 1
+            try:
+                if day_error:
+                    raise day_error
+                nulled = []
+                row = daily_row(forecastday, common=common, city=city, local_day=local_day,
+                                collected=collected, nulled=nulled)
+                candidate(FORECAST_DAILY_TABLE, row, nulled, query, day_prefix)
+            except QualityError as error:
+                daily_counts["rejected_rows"] += 1
+                city_counts[FORECAST_DAILY_TABLE]["rejected_rows"] += 1
+                reject(FORECAST_DAILY_TABLE, error, query, day_prefix)
+            if not isinstance(forecastday.get("hour"), list):
+                reject(FORECAST_TABLE, QualityError("invalid_forecast", "hour", "Forecast day must contain an hour list"), query, day_prefix)
+                continue
+            if local_day is not None:
+                horizon["days"].add(local_day)
             if not forecastday["hour"]:
                 reject(FORECAST_TABLE, day_error or QualityError("invalid_forecast", "hour", "Forecast hour list is empty"), query, day_prefix)
             for hour_position, hour in enumerate(forecastday["hour"]):
@@ -321,37 +411,41 @@ def transform_bronze(raw: bytes, source_blob: str) -> TransformResult:
                 try:
                     if day_error:
                         raise day_error
-                    metrics = _weather(hour)
+                    metrics, nulled = _weather(hour, _FORECAST_EXTRA_MEASURES)
                     target = instant(hour, "time_epoch", "time", city.timezone)
                     target_local_date = target.astimezone(ZoneInfo(city.timezone)).date()
                     if target_local_date != local_day:
                         raise QualityError("invalid_date", "date", "Forecast target differs from its local forecast day")
                     lead = (target - collected).total_seconds() / 3600
                     row = {**common, "target_at_utc": target, "target_local_date": target_local_date,
-                           "lead_time_hours": lead, "target_is_past_at_collection": lead < 0, **metrics,
-                           "chance_of_rain_pct": number(hour.get("chance_of_rain"), "chance_of_rain", integer=True, minimum=0, maximum=100),
-                           "chance_of_snow_pct": number(hour.get("chance_of_snow"), "chance_of_snow", integer=True, minimum=0, maximum=100)}
-                    candidates[FORECAST_TABLE].append((row, query, position))
-                    ignored["hour"].update(set(hour) - {
-                        "time_epoch", "time", "temp_c", "feelslike_c", "humidity", "pressure_mb", "wind_kph",
-                        "wind_degree", "precip_mm", "cloud", "condition", "is_day", "chance_of_rain", "chance_of_snow"})
+                           "lead_time_hours": lead, "target_is_past_at_collection": lead < 0, **metrics}
+                    candidate(FORECAST_TABLE, row, nulled, query, position)
                 except QualityError as error:
                     counts["rejected_rows"] += 1
                     city_counts[FORECAST_TABLE]["rejected_rows"] += 1
                     reject(FORECAST_TABLE, error, query, position)
 
-    observations = _deduplicate(candidates[OBSERVATION_TABLE], OBSERVATION_KEYS, OBSERVATION_TABLE,
-                                rejections, summary["tables"][OBSERVATION_TABLE], summary["city_tables"])
-    forecasts = _deduplicate(candidates[FORECAST_TABLE], FORECAST_KEYS, FORECAST_TABLE,
-                             rejections, summary["tables"][FORECAST_TABLE], summary["city_tables"])
+    accepted = {}
+    for table in (OBSERVATION_TABLE, FORECAST_TABLE, FORECAST_DAILY_TABLE):
+        accepted[table] = _deduplicate(candidates[table], TABLE_KEYS[table], table, rejections,
+                                       summary["tables"][table], summary["city_tables"])
+    # Row rejections first (stable order), then the measures nulled in kept rows.
+    row_rejected = any(rejection.scope == "row" for rejection in rejections)
+    for table in (OBSERVATION_TABLE, FORECAST_TABLE, FORECAST_DAILY_TABLE):
+        _accepted_field_rejections(pending_fields[table], accepted[table], TABLE_KEYS[table], rejections,
+                                   summary["tables"][table], summary["city_tables"], table)
+    summary["nulled_metrics"] = sum(counts["nulled_metrics"] for counts in summary["tables"].values())
+    observations, forecasts, daily = (accepted[OBSERVATION_TABLE], accepted[FORECAST_TABLE],
+                                      accepted[FORECAST_DAILY_TABLE])
     summary["cities"]["with_valid_observations"] = sorted({row["city_id"] for row in observations})
     summary["cities"]["with_valid_forecasts"] = sorted({row["city_id"] for row in forecasts})
+    summary["cities"]["with_valid_daily"] = sorted({row["city_id"] for row in daily})
     for city_id, horizon in sorted(city_horizons.items()):
         summary["horizons"][city_id] = _coverage(horizon["city"], horizon["days"], horizon["raw_hours"],
                                               [row for row in forecasts if row["city_id"] == city_id])
-    summary["ignored_fields"] = {section: sorted(fields) for section, fields in sorted(ignored.items()) if fields}
-    if not observations and not forecasts:
+    if not observations and not forecasts and not daily:
         if not collection_counts["successful"]:
             return result(status="empty", reason="collection_failed")
         return result(reason="no_valid_rows")
-    return result(observations, forecasts, status="partial" if rejections else "success")
+    # Field rejections alone keep "success": the row exists, one optional measure is null.
+    return result(observations, forecasts, status="partial" if row_rejected else "success", daily=daily)

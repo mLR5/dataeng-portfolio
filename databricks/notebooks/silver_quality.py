@@ -5,7 +5,9 @@
 # MAGIC Pure parsing rules used by the WeatherAPI Silver transformation.
 # MAGIC
 # MAGIC Errors contain stable codes and field names, never the rejected source value.
-# MAGIC Missing optional metrics remain null; malformed supplied metrics reject a row.
+# MAGIC Missing optional metrics remain null. v2: a malformed supplied OPTIONAL metric
+# MAGIC becomes null and is recorded as a field rejection (`lenient`); a malformed
+# MAGIC required value (identity, city, instant, temperature) still rejects its row.
 
 # COMMAND ----------
 
