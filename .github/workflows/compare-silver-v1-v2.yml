@@ -2,6 +2,7 @@ name: Compare Silver v1 and v2 (read-only)
 
 # Evidence for the Silver v2 migration: reads silver/weatherapi (v1) and
 # silver/weatherapi_v2 (v2) with delta-rs, prints PASS/FAIL lines and counts only.
+# Run after the first Silver v2 job run on silver/weatherapi_v2 (November 2026).
 on:
   push:
     branches: [validation/silver-v2-compare]
