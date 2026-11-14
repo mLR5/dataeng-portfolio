@@ -54,8 +54,15 @@ PROFILE_SECTIONS = (
     """),
 )
 PROFILE_PATHS = sorted(prefix + name for prefix, names in PROFILE_SECTIONS for name in names.split())
+def _is_bronze_envelope(path):
+    """Full Bronze archives only: fragments (e.g. synthetic forecastday blocks) are not envelopes."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return isinstance(data, dict) and "ingestion_id" in data and "cities" in data
+
+
 BRONZE_FIXTURES = sorted(path for path in FIXTURES.glob("*.json")
-                         if not path.name.endswith(".provenance.json") and path.name != "real_bronze_profiles.json")
+                         if not path.name.endswith(".provenance.json") and path.name != "real_bronze_profiles.json"
+                         and _is_bronze_envelope(path))
 
 
 def _scalar_paths(value, path=""):
