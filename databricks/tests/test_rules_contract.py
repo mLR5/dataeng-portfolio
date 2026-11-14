@@ -47,8 +47,13 @@ def test_explicit_contract_has_complete_keys_and_utc(name):
         assert schema.field(key).nullable is False
     assert schema.field("collected_at_utc").type == pa.timestamp("us", tz="UTC")
     assert schema.field("ingestion_date").type == pa.date32()
-    assert schema.field("temperature_c").nullable is False
-    assert schema.field("humidity_pct").nullable is True
+    if name == "forecast_daily_snapshots":
+        # Official daily values are all optional; the day itself is the key.
+        assert schema.field("temperature_max_c").nullable is True
+        assert schema.field("chance_of_rain_pct").type == pa.float64()
+    else:
+        assert schema.field("temperature_c").nullable is False
+        assert schema.field("humidity_pct").nullable is True
     assert empty_table(name).schema.equals(schema)
     assert empty_table(name).num_rows == 0
 
@@ -93,11 +98,14 @@ def test_registry_rejects_misresolved_city(update):
 def test_rejected_result_retains_provenance_without_business_rows():
     rejection = Rejection(table="envelope", code="invalid_json", message="Invalid JSON")
     result = TransformResult(observations=empty_table(OBSERVATION_TABLE),
-        forecasts=empty_table(FORECAST_TABLE), rejections=(rejection,),
+        forecasts=empty_table(FORECAST_TABLE), forecasts_daily=empty_table("forecast_daily_snapshots"),
+        rejections=(rejection,),
         summary={"reason": "invalid_json"}, status="rejected", ingestion_id=None,
         collected_at_utc=None, source_blob="weather/weatherapi/synthetic.json", source_sha256="f" * 64)
     assert result.tables[OBSERVATION_TABLE] is result.observation_snapshots
     assert result.tables[FORECAST_TABLE] is result.forecast_hourly_snapshots
+    assert result.tables["forecast_daily_snapshots"] is result.forecast_daily_snapshots
+    assert rejection.scope == "row"
     assert result.source_sha256 == "f" * 64
     assert json.loads(json.dumps(rejection.to_dict())) == asdict(rejection)
 
