@@ -3,6 +3,10 @@ name: Validate Gold dimensions and facts
 on:
   push:
     branches: [validation/gold-stage4]
+    paths:
+      - scripts/gold_cloud_run.py
+      - scripts/gold_validate_notebook.py
+      - databricks/notebooks/**
   workflow_dispatch:
     inputs:
       production:
@@ -33,7 +37,7 @@ jobs:
       SILVER_PATH: ${{ vars.DATABRICKS_SILVER_PATH || 'silver/weatherapi_v2' }}
       GOLD_RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
       GOLD_CUT_DATE: ${{ inputs.cut_date || '' }}
-      GOLD_PRODUCTION: ${{ inputs.production || 'true' }}
+      GOLD_PRODUCTION: ${{ inputs.production || 'false' }}
     steps:
       - uses: actions/checkout@v4
         with:
