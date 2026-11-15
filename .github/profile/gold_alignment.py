@@ -157,7 +157,7 @@ show("hour coverage per city and month (span clipped to first/last obs)",
 show("longest gaps (hours without obs) per city, top 5 each",
      """select city_id, gap_hours, count(*) n from (
           select city_id, date_diff('hour', lag(hour_utc) over (partition by city_id order by hour_utc), hour_utc) - 1 gap_hours
-          from (select distinct city_id, hour_utc from obs_h)) where gap_hours > 0 group by all
+          from (select distinct city_id, hour_utc from obs_h)) where gap_hours > 0 group by city_id, gap_hours
         qualify row_number() over (partition by city_id order by gap_hours desc) <= 6 order by city_id, gap_hours desc""")
 
 # ---------------- 4 ----------------
