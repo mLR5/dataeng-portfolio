@@ -14,6 +14,7 @@ for name in ("silver_root", "validation_root", "reference_root", "incremental_ro
              "production_root", "gold_root", "uc_schema"):
     dbutils.widgets.text(name, "")
 dbutils.widgets.dropdown("operation", "validation", ["validation", "production_verify"])
+dbutils.widgets.dropdown("verify_replay", "false", ["false", "true"])
 
 # COMMAND ----------
 
@@ -163,8 +164,8 @@ def validate_gold_history(spark, *, silver_root, validation_root, reference_root
     return report
 
 
-def verify_gold_production(spark, *, silver_root, gold_root, uc_schema=""):
-    """Read-only verification of the production job's completed Gold output."""
+def verify_gold_production(spark, *, silver_root, gold_root, uc_schema="", verify_replay=False):
+    """Read-only checks by default; an explicit replay probe expects no writes."""
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     silver_paths, gold_paths = SilverPaths(silver_root), GoldPaths(gold_root)
     build = latest_gold_build(spark, gold_paths)
@@ -220,10 +221,39 @@ def verify_gold_production(spark, *, silver_root, gold_root, uc_schema=""):
             if not _same_location(location, gold_paths.table(name)):
                 raise AssertionError(f"Production Unity Catalog location differs: {name}")
             registered[name] = f"{uc_schema}.{name}"
+    replay_report = None
+    if verify_replay:
+        # The probe is deliberately explicit: run_gold is the production write
+        # entry point, but with no pending source it must not commit anything.
+        # A concurrent Silver publication makes the probe fail rather than
+        # silently reporting a normal incremental build as a no-op success.
+        if len(source_rows) != len(ids):
+            raise AssertionError("Replay probe requires zero pending complete Silver sources")
+        versions_before = _gv_physical_versions(spark, gold_paths.root)
+        replay_report = run_gold(spark, silver_root=silver_paths.root,
+                                 gold_root=gold_paths.root, minimum_coverage_pct=98)
+        if (replay_report["changed"] is not False or replay_report["new_sources"] != 0
+                or replay_report["build_id"] != build["build_id"]):
+            raise AssertionError("Production replay unexpectedly published another Gold build")
+        if _gv_physical_versions(spark, gold_paths.root) != versions_before:
+            raise AssertionError("Production replay unexpectedly committed a Gold table or control version")
+    daily = tables["fact_forecast_daily"]
+    min_gt_avg = F.col("temperature_min_c") > F.col("temperature_avg_c")
+    avg_gt_max = F.col("temperature_avg_c") > F.col("temperature_max_c")
+    min_gt_max = F.col("temperature_min_c") > F.col("temperature_max_c")
+    anomaly_samples = daily.where(min_gt_avg | avg_gt_max | min_gt_max).select(
+        "city_id", "target_local_date", "issued_at_utc", "temperature_min_c",
+        "temperature_avg_c", "temperature_max_c",
+        F.concat_ws("|", F.when(min_gt_avg, F.lit("min_gt_avg")),
+                    F.when(avg_gt_max, F.lit("avg_gt_max")),
+                    F.when(min_gt_max, F.lit("min_gt_max"))).alias("violations")
+    ).orderBy("city_id", "target_local_date", "issued_at_utc").limit(20).collect()
     report = {"status": "passed", "operation": "production_verify", "build_id": build["build_id"],
               "build_sequence": build["build_sequence"], "source_count": len(ids),
               "pending_complete_sources": len(source_rows) - len(ids), "row_counts": counts,
-              "quality": quality, "metadata": metadata, "registered_tables": registered}
+              "quality": quality, "metadata": metadata, "registered_tables": registered,
+              "replay": replay_report,
+              "daily_temperature_order_samples": [row.asDict() for row in anomaly_samples]}
     _log("GOLD_PRODUCTION_VERIFIED", **report)
     return report
 
@@ -233,7 +263,8 @@ if dbutils.widgets.get("operation") == "production_verify":
     validation_report = verify_gold_production(spark,
         silver_root=dbutils.widgets.get("silver_root"),
         gold_root=dbutils.widgets.get("production_root") or dbutils.widgets.get("gold_root"),
-        uc_schema=dbutils.widgets.get("uc_schema"))
+        uc_schema=dbutils.widgets.get("uc_schema"),
+        verify_replay=dbutils.widgets.get("verify_replay") == "true")
 else:
     validation_report = validate_gold_history(spark,
         silver_root=dbutils.widgets.get("silver_root"),

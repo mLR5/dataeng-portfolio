@@ -33,7 +33,7 @@ jobs:
       SILVER_PATH: ${{ vars.DATABRICKS_SILVER_PATH || 'silver/weatherapi_v2' }}
       GOLD_RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
       GOLD_CUT_DATE: ${{ inputs.cut_date || '' }}
-      GOLD_PRODUCTION: ${{ inputs.production || 'false' }}
+      GOLD_PRODUCTION: ${{ inputs.production || 'true' }}
     steps:
       - uses: actions/checkout@v4
         with:
