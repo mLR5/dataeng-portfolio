@@ -54,6 +54,10 @@ PROFILE_SECTIONS = (
     """),
 )
 PROFILE_PATHS = sorted(prefix + name for prefix, names in PROFILE_SECTIONS for name in names.split())
+# Found by the first full Silver v2 replay (7,204 archives, 14 November 2026), absent
+# from the 52-archive profile: the validation block of an earlier collector (32 archives).
+PRODUCTION_ONLY_PATHS = sorted("_data_quality." + name for name in
+                               ("validation_timestamp", "is_valid", "checks_performed[]", "error_count", "errors[]"))
 def _is_bronze_envelope(path):
     """Full Bronze archives only: fragments (e.g. synthetic forecastday blocks) are not envelopes."""
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -88,7 +92,7 @@ def test_every_profiled_bronze_path_has_a_decision(pattern):
 
 
 def test_registry_holds_no_pattern_outside_the_observed_paths():
-    observed = set(PROFILE_PATHS)
+    observed = set(PROFILE_PATHS) | set(PRODUCTION_ONLY_PATHS)
     for path in BRONZE_FIXTURES:
         observed |= _scalar_paths(json.loads(path.read_text(encoding="utf-8")))
     assert set(FIELD_DECISIONS) == observed
@@ -279,3 +283,13 @@ def test_decisions_table_documents_every_pattern_in_order():
     rows = decisions_table()
     assert [row[0] for row in rows] == sorted(FIELD_DECISIONS)
     assert all(len(row) == 3 and row[1] in REGISTRY_DECISIONS and row[2] for row in rows)
+
+
+@pytest.mark.parametrize("errors", [["temperature out of range"], []])
+def test_older_collector_data_quality_block_is_known(errors):
+    data = _fixture()
+    data["_data_quality"] = {"validation_timestamp": "2026-02-01T10:00:00Z", "is_valid": True,
+                             "checks_performed": ["schema", "ranges"], "error_count": len(errors),
+                             "errors": errors}
+    assert unknown_paths(data) == []
+    assert all(FIELD_DECISIONS[path]["decision"] == "excluded" for path in PRODUCTION_ONLY_PATHS)

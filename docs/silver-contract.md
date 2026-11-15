@@ -166,7 +166,14 @@ rejets, `nulled_metrics` (rejets `field`), `requested_horizon_days`,
 JSON Bronze a une décision (`kept`, `added`, `derivable`, `represented`,
 `control`, `excluded`, `structural`). Un chemin inconnu apparaît dans
 `unknown_paths` et la publication (`unknown_path_count`) : c'est une alerte,
-pas une évolution de schéma automatique. Il remplace `ignored_fields`. Les compteurs par table distinguent `input_rows`,
+pas une évolution de schéma automatique. Il remplace `ignored_fields`.
+
+Le premier rejeu complet v2 (14 novembre 2026, 7 204 archives) a signalé un seul
+bloc inconnu : `_data_quality`, le rapport de validation d'une ancienne version du
+collecteur, présent dans 32 archives et absent de l'échantillon profilé. Il est
+désormais `excluded` (Silver revalide chaque valeur lui-même). Les lignes météo
+n'en dépendent pas, donc pas de nouvelle version de transformation ; les 32
+publications déjà écrites gardent leur alerte (tables insert-only), comme trace. Les compteurs par table distinguent `input_rows`,
 `valid_rows`, `rejected_rows`, `duplicates_removed` et `conflicting_rows`.
 Des doublons identiques sont réduits ; toutes les lignes d'un groupe de même
 clé avec contenu incompatible sont rejetées. Un total de rejets n'est pas un
