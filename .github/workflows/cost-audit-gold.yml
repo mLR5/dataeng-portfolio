@@ -1,0 +1,46 @@
+name: Read-only Azure and Gold cost audit
+
+on:
+  push:
+    branches: [audit/gold-costs-20261115]
+    paths:
+      - '.github/workflows/cost-audit-gold.yml'
+      - 'scripts/cost_audit_cloud.py'
+      - 'scripts/cost_audit_notebook.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weather-cost-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: dev
+    env:
+      PROJECT: ${{ secrets.TF_VAR_PROJECT_NAME }}
+      ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+      ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+      GOLD_RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Read actual costs, storage metadata and Databricks billing
+        run: python -I scripts/cost_audit_cloud.py
+      - name: Upload sanitized cost audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: weather-cost-audit
+          path: /tmp/cost-audit-result.json
+          if-no-files-found: warn
