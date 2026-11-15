@@ -86,15 +86,15 @@ def validate_gold_history(spark, *, silver_root, validation_root, reference_root
     # publication's storage-version pointers change to target the immutable copy.
     copied_versions = {}
     for name in SILVER_DATA_TABLES:
-        (frozen[name].write.format("delta").mode("errorifexists")
+        (frozen[name].write.format("delta").mode("error")
          .option("delta.enableDeletionVectors", "false").save(snapshot_paths.table(name)))
         copied_versions[name] = _version(spark, snapshot_paths.table(name))
-    (frozen[QUARANTINE].write.format("delta").mode("errorifexists")
+    (frozen[QUARANTINE].write.format("delta").mode("error")
      .option("delta.enableDeletionVectors", "false").save(snapshot_paths.table(QUARANTINE)))
     publications = frozen[PUBLICATIONS]
     for name, version_column in PUBLICATION_VERSION_COLUMNS.items():
         publications = publications.withColumn(version_column, F.lit(copied_versions[name]).cast("long"))
-    (publications.write.format("delta").mode("errorifexists")
+    (publications.write.format("delta").mode("error")
      .option("delta.enableDeletionVectors", "false").save(snapshot_paths.table(PUBLICATIONS)))
     copied_ids = {row[0] for row in spark.read.format("delta").load(
         snapshot_paths.table(PUBLICATIONS)).select("ingestion_id").collect()}

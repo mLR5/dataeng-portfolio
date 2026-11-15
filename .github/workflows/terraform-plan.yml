@@ -1,6 +1,8 @@
 name: Terraform Plan
 
 on:
+  push:
+    branches: [validation/gold-stage4]
   pull_request:
     paths:
       - 'infra/**'
