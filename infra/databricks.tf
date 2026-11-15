@@ -1,10 +1,10 @@
-# Silver on Databricks serverless (ADR 0001): one more brick of this infrastructure,
+# Silver and Gold on Databricks serverless (ADR 0001): part of this infrastructure,
 # applied by the same Deploy Infrastructure workflow as the rest.
 # Disabled by default: nothing below exists until the GitHub variable
 # DATABRICKS_ENABLED is true. The Function App only ingests Bronze.
 
 variable "databricks_enabled" {
-  description = "Create the serverless workspace, Unity Catalog access, Silver notebooks and job."
+  description = "Create the serverless workspace, Unity Catalog access, Silver/Gold notebooks and job."
   type        = bool
   default     = false
 }
@@ -27,7 +27,7 @@ variable "databricks_schedule_paused" {
 }
 
 variable "databricks_alert_emails" {
-  description = "Addresses notified when a Silver run fails."
+  description = "Addresses notified when a Silver or Gold task fails."
   type        = list(string)
   default     = []
 }
@@ -64,11 +64,16 @@ locals {
   databricks_url      = var.databricks_enabled ? "https://${azapi_resource.databricks_workspace[0].output.properties.workspaceUrl}" : null
   bronze_root         = "abfss://bronze@${module.storage.name}.dfs.core.windows.net"
   silver_root         = "${local.datalake_root}/${var.databricks_silver_path}"
+  gold_root           = "${local.datalake_root}/gold/weatherapi"
   silver_notebook_dir = "/Shared/weather-silver"
-  silver_notebooks    = var.databricks_enabled ? toset([
+  silver_notebooks = var.databricks_enabled ? toset([
     "silver_rules", "silver_bronze_contract", "silver_contract", "silver_cities", "silver_quality",
     "silver_bronze_legacy", "silver_registry", "silver_daily", "silver_transform", "silver_checks",
     "silver_pipeline", "silver_publish", "silver_freshness", "silver_explore",
+  ]) : toset([])
+  # Shared folder: Gold loads the deployed Silver reader with a relative %run.
+  gold_notebooks = var.databricks_enabled ? toset([
+    "gold_contract", "gold_dimensions", "gold_forecasts", "gold_pipeline", "gold_build",
   ]) : toset([])
 }
 
@@ -281,10 +286,16 @@ resource "databricks_notebook" "silver" {
   path     = "${local.silver_notebook_dir}/${each.key}"
 }
 
+resource "databricks_notebook" "gold" {
+  for_each = local.gold_notebooks
+  source   = "${path.module}/../databricks/notebooks/${each.key}.py"
+  path     = "${local.silver_notebook_dir}/${each.key}"
+}
+
 resource "databricks_job" "silver" {
   count       = local.databricks_count
   name        = "silver-weatherapi"
-  description = "Publish pending Bronze ingestions into Silver Delta tables, then check freshness."
+  description = "Publish Bronze into Silver, then check freshness and build Gold dimensions and facts."
   # Replaces the Blob lease: never two writers at once.
   max_concurrent_runs = 1
   # The first production run replays the whole Bronze history (47 min in
@@ -306,7 +317,7 @@ resource "databricks_job" "silver" {
 
   # No cluster block: notebook tasks run on serverless compute.
   # Tasks are declared in task_key order, as the Jobs API returns them, otherwise
-  # every plan shows the two tasks swapping. Execution order comes from depends_on.
+  # every plan shows tasks swapping. Execution order comes from depends_on.
   task {
     task_key = "freshness"
     depends_on {
@@ -317,6 +328,24 @@ resource "databricks_job" "silver" {
       notebook_path = databricks_notebook.silver["silver_freshness"].path
       base_parameters = {
         silver_root = local.silver_root
+      }
+    }
+  }
+
+  task {
+    task_key = "gold_build"
+    depends_on {
+      task_key = "publish"
+    }
+    max_retries               = 2
+    min_retry_interval_millis = 300000
+
+    notebook_task {
+      notebook_path = databricks_notebook.gold["gold_build"].path
+      base_parameters = {
+        silver_root = local.silver_root
+        gold_root   = local.gold_root
+        uc_schema   = "${databricks_catalog.weather[0].name}.${databricks_schema.gold[0].name}"
       }
     }
   }
@@ -344,7 +373,8 @@ resource "databricks_job" "silver" {
   # Every grant exists before the first run: a missing privilege fails the task visibly.
   depends_on = [
     databricks_grants.bronze, databricks_grants.silver, databricks_grants.gold,
-    databricks_grants.catalog, databricks_schema.silver, databricks_notebook.silver,
+    databricks_grants.catalog, databricks_schema.silver, databricks_schema.gold,
+    databricks_notebook.silver, databricks_notebook.gold,
   ]
 }
 

@@ -1,0 +1,58 @@
+name: Validate Gold dimensions and facts
+
+on:
+  push:
+    branches: [validation/gold-stage4]
+  workflow_dispatch:
+    inputs:
+      production:
+        description: Run the deployed production job, then verify Gold (requires deployment)
+        type: boolean
+        default: false
+      cut_date:
+        description: Optional UTC split date for cumulative incremental validation
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gold-stage4-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: dev
+    env:
+      PROJECT: ${{ secrets.TF_VAR_PROJECT_NAME }}
+      ENVIRONMENT: ${{ secrets.TF_VAR_ENVIRONMENT }}
+      ACCOUNT: ${{ secrets.TF_VAR_STORAGE_ACCOUNT_NAME }}
+      SILVER_PATH: ${{ vars.DATABRICKS_SILVER_PATH || 'silver/weatherapi_v2' }}
+      GOLD_RUN_TAG: ${{ github.run_id }}-${{ github.run_attempt }}
+      GOLD_CUT_DATE: ${{ inputs.cut_date || '' }}
+      GOLD_PRODUCTION: ${{ inputs.production || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run Gold validation through the deployment identity
+        run: |
+          args=()
+          if [[ "$GOLD_PRODUCTION" == 'true' ]]; then args+=(--production); fi
+          python -I scripts/gold_cloud_run.py "${args[@]}" --report /tmp/gold-stage4-result.json
+      - name: Upload sanitized validation result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gold-stage4-result
+          path: /tmp/gold-stage4-result.json
+          if-no-files-found: warn

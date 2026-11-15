@@ -1,4 +1,4 @@
-name: Test Silver notebooks
+name: Test Silver and Gold notebooks
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
 jobs:
   silver:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,7 +28,7 @@ jobs:
           cache-dependency-path: requirements-databricks.txt
       - name: Install Spark, Delta and test dependencies
         run: python -m pip install -r requirements-databricks.txt
-      - name: Run the notebooks' rules and pipeline tests against real local Delta tables
+      - name: Run Silver and Gold notebook tests against real local Delta tables
         run: |
           set -o pipefail
           python -m pytest databricks/tests -q -p no:cacheprovider -o testpaths=databricks/tests -rs | tee /tmp/silver-tests.txt
