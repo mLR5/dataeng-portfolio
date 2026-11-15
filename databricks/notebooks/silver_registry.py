@@ -64,6 +64,11 @@ def _registry_decisions():
     put("summary.total_cities", "structural", "summary_mismatch check against cities[]")
     put("summary.successful", "structural", "summary_mismatch check against cities[]")
     put("summary.failed", "structural", "summary_mismatch check against cities[]")
+    # Validation report written by an earlier collector version (32 archives, 2026):
+    # Silver re-validates every value itself and never trusts this verdict.
+    data_quality_reason = "collector-side validation report (older collector); Silver re-validates independently"
+    for name in ("validation_timestamp", "is_valid", "checks_performed[]", "error_count", "errors[]"):
+        put("_data_quality." + name, "excluded", data_quality_reason)
     put("forecast_request.days", "control", "publication summary requested_horizon_days (horizon coverage)")
     put(city + "status", "structural", "collection status: error -> collection_failed rejection")
     put(city + "city", "kept", "*.city_query (resolved to *.city_id by the city registry)")
