@@ -2,7 +2,7 @@ name: Test Silver and Gold notebooks
 
 on:
   push:
-    branches: [main]
+    branches: [main, ci/gold-stage4]
   pull_request:
   workflow_dispatch:
 
