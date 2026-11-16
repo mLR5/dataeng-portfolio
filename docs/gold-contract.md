@@ -104,7 +104,13 @@ l'activité viennent du registre ; une modification revue s'ajoute à
 coordonnées viennent des lignes Silver valides de chaque collecte, **arrondies à
 4 décimales** (précision fournie par WeatherAPI) pour qu'un bruit flottant ne crée
 pas de version. Les deux captures réelles des fixtures portent exactement les mêmes
-coordonnées (Paris 48.8667/2.3333, Bruxelles 50.8333/4.3333).
+coordonnées (Paris 48.8667/2.3333, Bruxelles 50.8333/4.3333). En revanche, sur
+Silver v2 complet (7 230 publications, mesure du 16 novembre 2026), WeatherAPI
+renvoie 6 couples distincts pour Paris (latitude 48.817 à 48.883), 9 pour Bruxelles
+et 17 pour Londres, avec trois ou quatre décimales : ce sont des changements de
+point de référence du fournisseur, pas du bruit flottant. L'arrondi ne les fusionne
+pas et l'historique compte alors 826 lignes ; un seuil de tolérance ou le suivi des
+seules coordonnées du registre reste une décision à prendre.
 
 Pour chaque ville et chaque instant de collecte, le tuple suivi combine les valeurs
 du registre en vigueur et les dernières coordonnées validées à cet instant ou avant.
