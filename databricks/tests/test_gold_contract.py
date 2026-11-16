@@ -8,7 +8,7 @@ import gold_pipeline
 
 
 EXPECTED_KEYS = {
-    "dim_city": ("city_id",),
+    "dim_city": ("city_sk",),
     "dim_date": ("date",),
     "dim_condition": ("condition_code", "is_day"),
     "dim_collection": ("ingestion_id",),
@@ -94,9 +94,20 @@ def _candidates(spark, contract, records):
     }
 
 
+def _city_versions(contract):
+    origin = contract.GOLD_CITY_VALID_FROM_ORIGIN
+    return [_required_row(contract, "dim_city", city_id=city.city_id,
+                          city_sk=contract.gold_city_sk(city.city_id, origin),
+                          valid_from_utc=origin, valid_to_utc=None, is_current=True)
+            for city in contract.CITIES]
+
+
+PARIS_SK = gold_pipeline.gold_city_sk("fr_paris", gold_pipeline.GOLD_CITY_VALID_FROM_ORIGIN)
+
+
 def _parents(contract):
     return {
-        "dim_city": [_required_row(contract, "dim_city", city_id="fr_paris")],
+        "dim_city": _city_versions(contract),
         "dim_date": [_required_row(contract, "dim_date", date=_DAY)],
         "dim_collection": [
             _required_row(contract, "dim_collection", ingestion_id="forecast"),
@@ -107,7 +118,7 @@ def _parents(contract):
 def test_validator_accepts_unknown_collection_date_and_absent_daily_condition(spark, gold_contract):
     records = _parents(gold_contract)
     records["fact_forecast_daily"] = [_required_row(
-        gold_contract, "fact_forecast_daily", city_id="fr_paris", ingestion_id="forecast",
+        gold_contract, "fact_forecast_daily", city_id="fr_paris", city_sk=PARIS_SK, ingestion_id="forecast",
         target_local_date=_DAY, issued_at_utc=_ISSUED, lead_days=0,
         condition_code=None, is_day=True,
     )]
@@ -117,8 +128,8 @@ def test_validator_accepts_unknown_collection_date_and_absent_daily_condition(sp
 
 @pytest.mark.parametrize("problem", ["null_key", "duplicate_key"])
 def test_validator_blocks_missing_or_duplicate_primary_key(spark, gold_contract, problem):
-    row = _required_row(gold_contract, "dim_city", city_id="fr_paris")
-    rows = [{**row, "city_id": None}] if problem == "null_key" else [row, row]
+    row = _city_versions(gold_contract)[0]
+    rows = [{**row, "city_sk": None}] if problem == "null_key" else [row, row]
     candidates = _candidates(spark, gold_contract, {"dim_city": rows})
     message = "required value missing" if problem == "null_key" else "duplicate key"
     with pytest.raises(ValueError, match=message):
@@ -132,15 +143,15 @@ def test_validator_rejects_error_linked_to_another_observation_ingestion(spark, 
         for ingestion in ("observation", "another-observation")
     ]
     records["fact_observation_hourly"] = [_required_row(
-        gold_contract, "fact_observation_hourly", city_id="fr_paris", hour_utc=_TARGET,
+        gold_contract, "fact_observation_hourly", city_id="fr_paris", city_sk=PARIS_SK, hour_utc=_TARGET,
         observed_at_utc=_TARGET, ingestion_id="observation", local_date=_DAY,
     )]
     records["fact_forecast_hourly"] = [_required_row(
-        gold_contract, "fact_forecast_hourly", city_id="fr_paris", target_hour_utc=_TARGET,
+        gold_contract, "fact_forecast_hourly", city_id="fr_paris", city_sk=PARIS_SK, target_hour_utc=_TARGET,
         issued_at_utc=_ISSUED, ingestion_id="forecast", target_local_date=_DAY,
     )]
     records["fact_forecast_hourly_error"] = [_required_row(
-        gold_contract, "fact_forecast_hourly_error", city_id="fr_paris", target_hour_utc=_TARGET,
+        gold_contract, "fact_forecast_hourly_error", city_id="fr_paris", city_sk=PARIS_SK, target_hour_utc=_TARGET,
         issued_at_utc=_ISSUED, ingestion_id="forecast", observed_at_utc=_TARGET,
         observation_ingestion_id="another-observation",
     )]
@@ -157,7 +168,7 @@ def test_validator_daily_error_requires_nonpast_forecast_and_complete_truth(
 ):
     records = _parents(gold_contract)
     common = {
-        "city_id": "fr_paris", "target_local_date": _DAY,
+        "city_id": "fr_paris", "city_sk": PARIS_SK, "target_local_date": _DAY,
         "issued_at_utc": _ISSUED, "ingestion_id": "forecast",
     }
     records["fact_forecast_daily"] = [_required_row(
@@ -169,3 +180,52 @@ def test_validator_daily_error_requires_nonpast_forecast_and_complete_truth(
     )]
     with pytest.raises(ValueError, match=message):
         gold_contract.validate_gold(spark, _candidates(spark, gold_contract, records))
+
+
+def _history(contract, *versions):
+    """Paris versions [(valid_from, valid_to, is_current)], other cities at origin."""
+    rows = [row for row in _city_versions(contract) if row["city_id"] != "fr_paris"]
+    for valid_from, valid_to, current in versions:
+        rows.append(_required_row(contract, "dim_city", city_id="fr_paris",
+                                  city_sk=contract.gold_city_sk("fr_paris", valid_from),
+                                  valid_from_utc=valid_from, valid_to_utc=valid_to, is_current=current))
+    return rows
+
+
+_ORIGIN = gold_pipeline.GOLD_CITY_VALID_FROM_ORIGIN
+_CHANGE = datetime(2026, 10, 17, 12, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("versions, message", [
+    (((_ORIGIN, None, True), (_CHANGE, None, True)), "one current row"),
+    (((_ORIGIN, datetime(2026, 10, 17, tzinfo=timezone.utc), False), (_CHANGE, None, True)), "contiguous"),
+    (((_CHANGE, None, True),), "contiguous"),
+])
+def test_validator_rejects_overlapping_or_gapped_city_history(spark, gold_contract, versions, message):
+    records = _parents(gold_contract)
+    records["dim_city"] = _history(gold_contract, *versions)
+    with pytest.raises(ValueError, match=message):
+        gold_contract.validate_gold(spark, _candidates(spark, gold_contract, records))
+
+
+def test_validator_requires_the_city_version_valid_at_the_collection_instant(spark, gold_contract):
+    records = _parents(gold_contract)
+    # Paris changed before the forecast was issued: the origin version is closed.
+    records["dim_city"] = _history(gold_contract, (_ORIGIN, _CHANGE, False), (_CHANGE, None, True))
+    records["fact_forecast_daily"] = [_required_row(
+        gold_contract, "fact_forecast_daily", city_id="fr_paris", city_sk=PARIS_SK,
+        ingestion_id="forecast", target_local_date=_DAY, issued_at_utc=_ISSUED, lead_days=0)]
+    with pytest.raises(ValueError, match="version valid at the collection instant"):
+        gold_contract.validate_gold(spark, _candidates(spark, gold_contract, records))
+    records["fact_forecast_daily"][0]["city_sk"] = gold_contract.gold_city_sk("fr_paris", _CHANGE)
+    gold_contract.validate_gold(spark, _candidates(spark, gold_contract, records))
+
+
+def test_city_surrogate_key_is_deterministic_and_matches_spark(spark, gold_contract):
+    sk = gold_contract.gold_city_sk("fr_paris", _CHANGE)
+    assert sk == gold_contract.gold_city_sk("fr_paris", _CHANGE.astimezone(gold_contract.ZoneInfo("Europe/Paris")))
+    assert len(sk) == 16 and sk != gold_contract.gold_city_sk("be_brussels", _CHANGE)
+    frame = spark.createDataFrame([("fr_paris", _CHANGE)], "city_id string, valid_from_utc timestamp")
+    spark_sk = frame.select(gold_contract._gold_city_sk_column(
+        gold_pipeline.F.col("city_id"), gold_pipeline.F.col("valid_from_utc"))).first()[0]
+    assert spark_sk == sk

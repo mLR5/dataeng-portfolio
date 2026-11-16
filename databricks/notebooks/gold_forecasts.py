@@ -27,14 +27,21 @@ def _gold_daily_observed_truth(observations, cities):
     difference between consecutive local midnights supplies 23/24/25 expected
     slots. This is deliberately not a count of distinct local clock labels.
     """
+    # The average sums the sorted temperatures: a full build and an incremental
+    # window read different partitions, and a floating sum must not depend on order.
     observed = observations.groupBy("city_id", "local_date").agg(
         F.countDistinct("hour_utc").alias("observed_hours"),
         F.count("temperature_c").alias("temperature_hours"),
         F.min("temperature_c").alias("observed_temperature_min_c"),
         F.max("temperature_c").alias("observed_temperature_max_c"),
-        F.avg("temperature_c").alias("observed_temperature_avg_c"),
-    )
-    zoned = observed.join(cities.select("city_id", "timezone"), "city_id")
+        F.array_sort(F.collect_list("temperature_c")).alias("_temperatures"),
+    ).withColumn("observed_temperature_avg_c", F.when(F.col("temperature_hours") > 0, F.aggregate(
+        "_temperatures", F.lit(0.0).cast("double"), lambda total, value: total + value)
+        / F.col("temperature_hours")))
+    # One time zone per city: the current SCD 2 version.
+    zones = cities.where("is_current").select("city_id", "timezone") if "is_current" in cities.columns \
+        else cities.select("city_id", "timezone")
+    zoned = observed.join(zones, "city_id")
     start = F.to_utc_timestamp(F.col("local_date").cast("timestamp"), F.col("timezone"))
     end = F.to_utc_timestamp(F.date_add("local_date", 1).cast("timestamp"), F.col("timezone"))
     return (zoned.withColumn("expected_hours", ((end.cast("long") - start.cast("long")) / 3600).cast("long"))
@@ -43,21 +50,25 @@ def _gold_daily_observed_truth(observations, cities):
             .withColumnRenamed("local_date", "target_local_date"))
 
 
-def build_gold_forecasts(spark, inputs, dimensions):
-    """Build the four forecast facts from frozen Silver inputs and canonical truth.
-
-    Missing truth gives no error row yet; a subsequent build can score the same
-    earlier forecast once its observation becomes available. Daily lead -1 rows
-    remain in the forecast history but never enter the daily error table.
-    """
-    hourly_source = inputs[FORECAST_TABLE]
-    hourly = (hourly_source.where(F.col("lead_time_hours") > 0)
+def gold_hourly_forecasts(source):
+    """Strictly future hourly emissions of the given Silver rows (city_sk unresolved)."""
+    hourly = (source.where(F.col("lead_time_hours") > 0)
               .withColumnRenamed("target_at_utc", "target_hour_utc")
               .withColumnRenamed("collected_at_utc", "issued_at_utc")
-              .withColumn("local_hour", F.hour(F.from_utc_timestamp("target_hour_utc", F.col("source_timezone")))))
-    hourly = _gf_project(hourly, "fact_forecast_hourly")
+              .withColumn("local_hour", F.hour(F.from_utc_timestamp("target_hour_utc", F.col("source_timezone"))))
+              .withColumn("city_sk", F.lit(None).cast("string")))
+    return _gf_project(hourly, "fact_forecast_hourly")
 
-    observations = dimensions["fact_observation_hourly"]
+
+def gold_daily_forecasts(source):
+    daily = (source.withColumnRenamed("collected_at_utc", "issued_at_utc")
+             .withColumn("is_day", F.lit(True))
+             .withColumn("city_sk", F.lit(None).cast("string")))
+    return _gf_project(daily, "fact_forecast_daily")
+
+
+def gold_hourly_errors(hourly, observations):
+    """Score forecasts (Gold rows, city_sk kept) against canonical observations."""
     truth = observations.select(
         "city_id", F.col("hour_utc").alias("target_hour_utc"),
         F.col("ingestion_id").alias("observation_ingestion_id"), "observed_at_utc",
@@ -68,14 +79,12 @@ def build_gold_forecasts(spark, inputs, dimensions):
                     .withColumn("temperature_error_c", F.col("forecast_temperature_c") - F.col("observed_temperature_c"))
                     .withColumn("absolute_temperature_error_c", F.abs("temperature_error_c"))
                     .withColumn("squared_temperature_error_c", F.pow("temperature_error_c", 2)))
-    hourly_error = _gf_project(hourly_error, "fact_forecast_hourly_error")
+    return _gf_project(hourly_error, "fact_forecast_hourly_error")
 
-    daily = (inputs[FORECAST_DAILY_TABLE]
-             .withColumnRenamed("collected_at_utc", "issued_at_utc")
-             .withColumn("is_day", F.lit(True)))
-    daily = _gf_project(daily, "fact_forecast_daily")
 
-    daily_truth = _gold_daily_observed_truth(observations, dimensions["dim_city"])
+def gold_daily_errors(daily, observations, cities):
+    """Score non-past daily forecasts against complete local days of observations."""
+    daily_truth = _gold_daily_observed_truth(observations, cities)
     daily_error = daily.where(F.col("lead_days") >= 0)
     for metric in ("min", "max", "avg"):
         daily_error = daily_error.withColumnRenamed(
@@ -85,11 +94,26 @@ def build_gold_forecasts(spark, inputs, dimensions):
         daily_error = daily_error.withColumn(
             f"temperature_{metric}_error_c",
             F.col(f"forecast_temperature_{metric}_c") - F.col(f"observed_temperature_{metric}_c"))
-    daily_error = _gf_project(daily_error, "fact_forecast_daily_error")
+    return _gf_project(daily_error, "fact_forecast_daily_error")
 
+
+def build_gold_forecasts(spark, inputs, dimensions):
+    """Build the four forecast facts from frozen Silver inputs and canonical truth.
+
+    Missing truth gives no error row yet; a subsequent build can score the same
+    earlier forecast once its observation becomes available. Daily lead -1 rows
+    remain in the forecast history but never enter the daily error table.
+    city_sk is the dim_city version valid at the issuing collection.
+    """
+    cities = dimensions["dim_city"]
+    hourly = gold_resolve_city_sk(gold_hourly_forecasts(inputs[FORECAST_TABLE]), cities,
+                                  "issued_at_utc", "fact_forecast_hourly")
+    daily = gold_resolve_city_sk(gold_daily_forecasts(inputs[FORECAST_DAILY_TABLE]), cities,
+                                 "issued_at_utc", "fact_forecast_daily")
+    observations = dimensions["fact_observation_hourly"]
     return {
         "fact_forecast_hourly": hourly,
-        "fact_forecast_hourly_error": hourly_error,
+        "fact_forecast_hourly_error": gold_hourly_errors(hourly, observations),
         "fact_forecast_daily": daily,
-        "fact_forecast_daily_error": daily_error,
+        "fact_forecast_daily_error": gold_daily_errors(daily, observations, cities),
     }
