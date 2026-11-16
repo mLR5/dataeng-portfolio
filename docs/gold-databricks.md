@@ -38,11 +38,19 @@ publish ─┬─ freshness
 minutes. Une erreur Gold fait échouer le job ; les notifications e-mail suivent
 la variable GitHub `DATABRICKS_ALERT_EMAILS` déjà existante.
 
-Terraform transmet `silver_root`, `gold_root` et `uc_schema` au notebook.
-La racine de production Gold est
-`abfss://datalake@<compte>.dfs.core.windows.net/gold/weatherapi` ; le schéma est
-`<projet>_<env>.gold`. Le catalogue, le schéma Gold, l'emplacement externe et
-les droits du principal existaient déjà avant ce lot.
+Terraform transmet `silver_root`, `gold_root`, `uc_schema` et
+`full_rebuild_weekday = "6"` au notebook. La racine de production Gold 2.0.0 est
+`abfss://datalake@<compte>.dfs.core.windows.net/gold/weatherapi_v2` ; le schéma
+est `<projet>_<env>.gold`. La racine 1.0.0 `gold/weatherapi` reste sur le stockage,
+n'est plus alimentée et peut servir de comparaison : le contrat interdit de
+mélanger deux versions dans une racine. Le catalogue, le schéma Gold,
+l'emplacement externe `gold/` et les droits du principal existaient déjà.
+
+L'enregistrement Unity Catalog suit la même règle que Silver : un nom déjà
+enregistré ailleurs (la racine 1.0.0) est **déplacé**. Seule la définition de la
+table EXTERNAL est supprimée, jamais ses fichiers, puis la table est recréée sur
+le nouveau chemin. Une table MANAGED du même nom est refusée. Le premier run
+après déploiement construit `weatherapi_v2` en complet, puis déplace les dix noms.
 
 ## Tables et publication
 
@@ -58,16 +66,20 @@ temps, avec les deletion vectors désactivés. La table `fact_forecast_daily`
 porte la contrainte Delta `lead_days_range` : `lead_days BETWEEN -1 AND 2`.
 
 Le contrôle `<gold_root>/_control/builds` enregistre les publications Gold,
-leurs identifiants sources et les versions Delta des tables. Il est écrit en
-dernier, une fois les sorties construites et contrôlées.
+leurs identifiants sources, le mode de chargement et les versions Delta des tables
+et des contrôles. Il est écrit en dernier, une fois les sorties construites et
+contrôlées. Deux petites tables de contrôle servent l'incrémental :
+`_control/city_locations` (coordonnées validées par ingestion et ville, source de
+la SCD 2) et `_control/condition_label_counts` (effectifs des libellés, source de
+la SCD 1).
 
 La source est l'ensemble figé des ingestions Silver marquées `complete`, y
 compris les publications `partial`. Une publication partielle peut contenir
 des données valides pour Paris et Bruxelles malgré un rejet géographique de
 Londres. Filtrer uniquement les statuts `success` retirerait cet historique.
 
-Chaque table Gold est remplacée atomiquement par Delta, mais le remplacement
-de dix tables ne constitue pas une transaction multi-table. La lecture directe
+Chaque écriture Gold (remplacement ou MERGE) est atomique par table, mais dix
+écritures ne constituent pas une transaction multi-table. La lecture directe
 des noms Unity Catalog offre l'atomicité par table. Les consommateurs qui
 exigent un état cohérent entre toutes les tables doivent utiliser le manifeste
 publié et les fonctions `gold_read_plan` puis `read_gold` de `gold_pipeline` :
@@ -79,29 +91,43 @@ les sorties, sans effacer les contrôles ni modifier les snapshots Silver.
 
 ## Incrémental et périodes explicites
 
-`gold_build` expose `start_date`, `end_date` et `mode`, en plus des racines et
-du schéma Unity Catalog. Les dates sélectionnent les **collectes sources UTC**,
-avec début inclus et fin exclue. Une demande du `2026-11-10` au `2026-11-13`
-sélectionne les collectes des 10, 11 et 12 novembre.
+`gold_build` expose `start_date`, `end_date`, `mode` et `full_rebuild_weekday`,
+en plus des racines et du schéma Unity Catalog. Les dates sélectionnent les
+**collectes sources UTC**, avec début inclus et fin exclue. Une demande du
+`2026-11-10` au `2026-11-13` sélectionne les collectes des 10, 11 et 12 novembre.
 
-- `mode=incremental` ajoute les nouvelles ingestions sélectionnées à l'ensemble
-  déjà publié dans le manifeste. Sans nouvelle ingestion, il n'écrit rien.
-- `mode=full` force la reconstruction des résultats sur cet ensemble cumulatif.
+- `mode=incremental` (défaut) ajoute les nouvelles ingestions sélectionnées à
+  l'ensemble déjà publié dans le manifeste et les charge par MERGE. Sans nouvelle
+  ingestion, il n'écrit rien.
+- `mode=full` recalcule toutes les tables sur l'ensemble cumulatif et les
+  remplace : c'est la référence de l'incrémental.
+- `full_rebuild_weekday` (0 = lundi … 6 = dimanche, UTC ; vide = désactivé) force
+  `mode=full` ce jour-là, même sans nouvelle ingestion. Le job le fixe à `6` :
+  filet de sécurité hebdomadaire, sur le modèle de `full_scan_weekday` de Silver.
 - Une période explicite ne retire jamais les ingestions des builds précédents.
   Pour construire une sortie limitée à une période, utiliser une racine Gold
   distincte et vide, ainsi qu'un schéma de validation adapté.
 
-Cette première version choisit la correction avant l'optimisation : à chaque
-changement de l'ensemble source, elle **recalcule l'ensemble des tables dérivées**.
-L'avancement source est incrémental ; le calcul dérivé reste complet. Le coût
-augmente donc avec l'historique. L'optimisation par clés et jours affectés est
-différée et devra préserver l'équivalence avec le recalcul complet de référence.
+Le premier build d'une racine est toujours complet. Ensuite, chaque table suit la
+stratégie décrite dans [gold-contract.md](gold-contract.md#stratégie-de-chargement) :
+insertion seule pour les dimensions de collecte, le calendrier et les prévisions,
+SCD 2 pour `dim_city`, SCD 1 pour `dim_condition`, upsert restreint à la fenêtre
+affectée pour l'observation canonique et les deux tables d'erreurs. La fenêtre,
+par ville, vaut `[min(collected_at_utc) - 1 jour, max(collected_at_utc) + 3 jours]`
+des nouvelles ingestions, élargie à leurs cibles ; les observations Silver de la
+fenêtre, avec une marge d'une heure, sont relues pour recalculer les heures
+canoniques. La qualité (couverture, alertes d'ordre des températures) est calculée
+sur les tables Gold, petites, et non sur tout Silver.
 
-Cette stratégie prend en compte les observations tardives qui changent l'heure
-canonique, les nouvelles observations permettant d'évaluer des prévisions déjà
-publiées, et les dimensions dépendantes de l'historique. Les dates des sources
-ne sont pas un filtre direct sur les dates cibles des prévisions ni sur les
-jours locaux des observations.
+Le build bascule seul en `full` (`load_reason = city_history_changed`) si une
+collecte tardive ou une modification du registre change une version de ville qui
+commence avant la dernière collecte déjà consommée. Le rapport et le manifeste
+indiquent `load_mode` (`full` ou `incremental`) et la raison.
+
+Une exécution interrompue laisse des MERGE partiels hors manifeste. La relance est
+sûre : les insertions ignorent les clés présentes, les upserts recalculent la
+fenêtre et les compteurs SCD 1 sont réécrits en valeur absolue depuis le build
+précédent épinglé.
 
 Le registre Gold est lié à sa source et à sa version de contrat. Un changement
 des règles doit suivre une migration explicite vers une sortie dédiée ; il ne
@@ -121,7 +147,11 @@ python -m pytest databricks/tests -q -o testpaths=databricks/tests
 
 Les contrôles portent notamment sur les clés, les relations et l'équivalence
 du calcul complet avec plusieurs lots incrémentaux pour le même ensemble de
-sources. Les cas de changement d'heure, ex æquo, données absentes et collecte
+sources (`test_gold_incremental_delta.py` : quatre lots MERGE comparés ligne à
+ligne, historique `dim_city` et contrôles compris, avec une observation tardive
+plus proche de l'heure, une vérité arrivée après ses prévisions et un changement
+de coordonnées ; lot vide sans commit ; tables à insertion seule jamais réécrites ;
+recalcul hebdomadaire identique). Les cas de changement d'heure, ex æquo, données absentes et collecte
 tardive doivent rester couverts. Les erreurs quotidiennes exigent une vérité
 disponible sur le jour local complet de 23, 24 ou 25 heures ; les températures
 issues d'observations horaires décrivent cet échantillonnage, pas des extrema
