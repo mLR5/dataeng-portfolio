@@ -383,7 +383,7 @@ def gold_dashboard_read_plan(spark, gold_root):
     }
 
 
-def validate_gold_daily_aggregate(frame):
+def validate_gold_daily_aggregate(frame, observations=None):
     """Reject broken identities, coverage and missing-value semantics before publish."""
     schema = AGG_CITY_DAILY_SCHEMA
     if frame.schema.fieldNames() != schema.fieldNames() or any(
@@ -421,6 +421,14 @@ def validate_gold_daily_aggregate(frame):
                | (F.col("daylight_hours") < 0) | (F.col("daylight_hours") > 25))
     if frame.where(invalid).limit(1).count():
         raise ValueError("Gold daily aggregate invalid coverage or metric values")
+    if observations is not None:
+        expected = observations.groupBy("city_id", "local_date").agg(
+            F.countDistinct("hour_utc").alias("_source_hours"))
+        reconciled = frame.select("city_id", "local_date", "observed_hours").join(
+            expected, ["city_id", "local_date"], "full")
+        if reconciled.where(F.coalesce(F.col("observed_hours"), F.lit(0))
+                            != F.coalesce(F.col("_source_hours"), F.lit(0))).limit(1).count():
+            raise ValueError("Gold daily aggregate lost or added canonical observation hours")
     return frame.count()
 
 
@@ -523,7 +531,7 @@ def run_gold_dashboard(spark, *, gold_root, uc_schema="", now=None, force=False)
     aggregate = build_gold_daily_aggregate(spark, tables)
     version = _write_gold_dashboard_aggregate(spark, paths, aggregate)
     candidate = spark.read.format("delta").option("versionAsOf", version).load(paths.table("agg_city_daily"))
-    count = validate_gold_daily_aggregate(candidate)
+    count = validate_gold_daily_aggregate(candidate, observations=tables["fact_observation_hourly"])
     if uc_schema:
         _publish_gold_dashboard_views(spark, paths, uc_schema, queries)
     record = {

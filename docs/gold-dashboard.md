@@ -102,12 +102,19 @@ Le schéma exécutable est `AGG_CITY_DAILY_SCHEMA` dans
 [gold_dimensions.py](../databricks/notebooks/gold_dimensions.py).
 
 Pour une ville ayant des observations canoniques, le calendrier commence à la
-date locale de sa première collecte contenant une donnée météo valide et se
-termine à sa dernière date locale observée. Une ville sans observation n'a pas
+plus ancienne date locale connue entre sa première collecte contenant une donnée
+météo valide et sa première observation canonique, puis se termine à sa dernière
+date locale observée. Une observation encore datée de la veille lors d'une
+première collecte après minuit est ainsi conservée. Si la date de première
+collecte manque, les observations établissent le début. Une ville sans observation n'a pas
 de ligne dans cet agrégat ; elle reste présente dans `dim_city`. Les jours
 intermédiaires sans observation restent visibles. Il n'y a ni observation
-inventée ni extension de l'historique avant la première collecte valide d'une
+inventée ni extension de l'historique avant le premier jour valide connu d'une
 ville, notamment pour Londres.
+
+Avant publication, un contrôle rapproche le nombre d'heures observées de
+l'agrégat et celui des observations Gold sources, par ville et date locale.
+Une heure manquante ou ajoutée empêche la publication du nouveau registre.
 
 | Colonnes | Définition |
 | --- | --- |
@@ -203,6 +210,13 @@ même fichier. Ils ne garantissent pas la compatibilité des données. Le contra
 clés, les unités, les fuseaux, les règles de publication et les versions Delta
 référencées par le registre `publications`.
 
+Le code Gold charge aussi `silver_pipeline` par `%run` et réutilise ses
+interfaces, notamment `SilverPaths`, `_version`, `_delta`, `_same_location`, les
+exceptions de publication/catalogue et les constantes de contrat. Une refonte
+de ces fonctions ou de leurs signatures peut casser le Gold même avec des tables
+Silver identiques. Le lot Silver doit conserver ces interfaces, ou prévoir
+l'adaptation Gold lors du rapprochement des branches.
+
 Une réorganisation du job ou des fonctions Silver qui conserve ce contrat peut
 être intégrée indépendamment. Un changement de schéma, de clé, d'identité de
 ville, de sélection des publications ou de règle métier demande une adaptation
@@ -210,13 +224,14 @@ et un rejeu comparatif Gold. Les changements doivent être rapprochés et testé
 sur la même révision avant un déploiement du job partagé. Les contrôles Gold
 de l'étape 4 restent requis ; l'ajout de vues ne remplace pas ces contrôles.
 
-## Validation attendue
+## Validation
 
 Les tests utilisent les notebooks existants via le même chargement `%run` que
 le reste de la suite Databricks. Les cas propres à cette couche comprennent :
 
 - jours locaux de 23, 24 et 25 heures, heures répétées, journées absentes et
-  journées de début ou de fin incomplètes ;
+  journées de début ou de fin incomplètes, observation datée de la veille de
+  la première collecte et rapprochement des heures avec le Gold source ;
 - métriques partiellement ou entièrement nulles, compteurs par métrique et
   absence d'imputation ;
 - repli solaire vers une paire complète du même jour, sans assemblage de deux
@@ -228,7 +243,28 @@ le reste de la suite Databricks. Les cas propres à cette couche comprennent :
 - équivalence entre un build complet et le même ensemble de sources admis par
   plusieurs lots, ainsi que relance sans écriture inutile.
 
-Après les tests locaux, la validation d'exécution doit utiliser une racine Gold
+### Résultats locaux du 16 novembre 2026
+
+La suite Databricks complète a réussi : **573 tests, aucun échec ni test
+ignoré**, en 788,03 s, sur la première implémentation
+[`02b78b7`](https://github.com/mLR5/dataeng-portfolio/commit/02b78b7ae98f71b977289cedd93298b594444d10).
+Après la correction du calendrier initial et l'ajout du rapprochement des
+heures sources, les **36 tests ciblés du lot** ont été réexécutés avec succès,
+sans test ignoré, en 189,80 s. Ces nombres correspondent à deux exécutions avec
+des tests communs ; ils ne s'additionnent pas.
+
+La dernière passe couvre aussi la stabilité des trois vues persistantes pour
+un client en `America/New_York`, l'arrêt d'une publication qui perd des heures,
+et sa réparation. Environnement : Spark 4.0.5, Delta Spark 4.0.1, Python 3.12
+et Java 21. Les tests écrivent de vraies tables Delta locales ; aucune donnée
+Azure n'est modifiée.
+
+```bash
+python -m pytest databricks/tests -q -o testpaths=databricks/tests -rs
+python -m pytest databricks/tests/test_gold_daily_aggregate.py databricks/tests/test_gold_dashboard_pipeline.py databricks/tests/test_gold_dashboard_views.py -q -rs
+```
+
+La validation d'exécution sur Databricks doit utiliser une racine Gold
 et un schéma Unity Catalog isolés. Il reste ensuite à vérifier les droits de
 lecture avec l'identité du futur outil de dashboard, puis à réaliser les pages.
 En particulier, la persistance des clauses `VERSION AS OF` dans les vues doit

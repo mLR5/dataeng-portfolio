@@ -117,6 +117,22 @@ def test_daily_aggregate_partial_days_and_nullable_metrics_keep_counts(spark):
     assert row.precipitation_is_complete is False
 
 
+@pytest.mark.parametrize("first_collection", [datetime(2026, 1, 4, 0, 15, tzinfo=UTC), None])
+def test_daily_aggregate_keeps_observations_before_first_collection_day_or_without_metadata(spark, first_collection):
+    # Paris is already on 4 January at collection. The API's canonical observation
+    # still belongs to 3 January locally, and must not disappear from the aggregate.
+    preceding_hour = datetime(2026, 1, 3, 22, tzinfo=UTC)
+    observations = [_observation(preceding_hour, temperature_c=10.0),
+                    _observation(preceding_hour + timedelta(hours=2), temperature_c=12.0)]
+    tables = _tables(spark, [_city(first=first_collection)], observations)
+    rows = gold.build_gold_daily_aggregate(spark, tables).orderBy("local_date").collect()
+    assert [row.local_date for row in rows] == [date(2026, 1, 3), date(2026, 1, 4)]
+    assert [row.observed_hours for row in rows] == [1, 1]
+    assert sum(row.observed_hours for row in rows) == len(observations)
+    assert sum(row.temperature_observed_hours for row in rows) == len(observations)
+    assert rows[0].temperature_avg_c == 10.0 and rows[1].temperature_avg_c == 12.0
+
+
 def _forecast(issued, ingestion_id, sunrise, sunset, target=BASE.date()):
     return _record("fact_forecast_daily", city_id="fr_paris", target_local_date=target,
                    issued_at_utc=issued, ingestion_id=ingestion_id, sunrise_utc=sunrise, sunset_utc=sunset)

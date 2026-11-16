@@ -219,10 +219,13 @@ def build_gold_dimensions(spark, inputs):
 def build_gold_daily_aggregate(spark, tables):
     """Derive one sampled-weather row per city/local day from frozen Gold v1.
 
-    The calendar starts at each city's first valid collected local date and ends
-    at its last canonical observed local date. Missing intervening dates remain
-    visible with zero observations and null weather, including before London's
-    first valid observation only if another valid table established that city.
+    The calendar starts at the earlier of each city's first valid collected local
+    date and its first canonical observed local date, and ends at its last observed
+    local date. Thus an API observation from the preceding day is retained even
+    when the first collection happens after midnight. If collection metadata is
+    missing, actual observations establish the start. Missing intervening dates
+    remain visible with zero observations and null weather; no date predates both
+    the valid collection history and the observed history of a city.
     Every coverage denominator is a whole IANA local day, including incomplete
     boundary days. Repeated autumn clock hours are distinct canonical UTC hours.
 
@@ -241,10 +244,12 @@ def build_gold_daily_aggregate(spark, tables):
         raise ValueError("Gold daily aggregates require the UTC Spark session timezone")
     observations = tables["fact_observation_hourly"]
     cities = tables["dim_city"].select("city_id", "timezone", "first_collected_at_utc")
-    last_days = observations.groupBy("city_id").agg(F.max("local_date").alias("_last_date"))
+    last_days = observations.groupBy("city_id").agg(
+        F.min("local_date").alias("_first_observed_date"),
+        F.max("local_date").alias("_last_date"))
     limits = (cities.join(last_days, "city_id", "inner")
-              .withColumn("_first_date", F.to_date(F.from_utc_timestamp(
-                  F.col("first_collected_at_utc"), F.col("timezone"))))
+              .withColumn("_first_date", F.least(F.col("_first_observed_date"),
+                  F.to_date(F.from_utc_timestamp(F.col("first_collected_at_utc"), F.col("timezone")))))
               .where(F.col("_first_date").isNotNull() & (F.col("_first_date") <= F.col("_last_date"))))
     calendar = limits.select("city_id", "timezone",
         F.explode(F.sequence("_first_date", "_last_date")).alias("local_date"))

@@ -261,6 +261,43 @@ def test_dashboard_recovers_unpublished_aggregate_overwrite_without_new_core_bui
     assert _versions(paths) == core_versions
 
 
+def test_dashboard_rejects_lost_canonical_hours_then_recovers(
+    delta_spark, published_gold, monkeypatch,
+):
+    spark = delta_spark
+    paths = published_gold
+    original = gold.run_gold_dashboard(spark, gold_root=paths.root, now=NOW)
+    previous = gold.gold_dashboard_read_plan(spark, paths.root)
+    versions = _dashboard_versions(paths)
+    core_plan = gold.gold_read_plan(spark, paths.root)
+    build = gold.build_gold_daily_aggregate
+
+    def drop_all_rows(*args, **kwargs):
+        return build(*args, **kwargs).limit(0)
+
+    monkeypatch.setattr(gold, "build_gold_daily_aggregate", drop_all_rows)
+    with pytest.raises(ValueError, match="lost or added canonical observation hours"):
+        gold.run_gold_dashboard(spark, gold_root=paths.root, now=NOW, force=True)
+    after_failure = _dashboard_versions(paths)
+    assert after_failure["agg_city_daily"] > versions["agg_city_daily"]
+    assert after_failure["dashboard_builds"] == versions["dashboard_builds"]
+    assert spark.read.format("delta").load(paths.table("agg_city_daily")).count() == 0
+    assert gold.gold_dashboard_read_plan(spark, paths.root) == previous
+    assert _aggregate_rows(spark, previous)[0].temperature_avg_c == 10.0
+    assert gold.gold_read_plan(spark, paths.root) == core_plan
+
+    monkeypatch.setattr(gold, "build_gold_daily_aggregate", build)
+    # The physical version diverged during the rejected candidate. A normal
+    # rerun therefore repairs the table without requiring a new core build.
+    repaired = gold.run_gold_dashboard(spark, gold_root=paths.root, now=NOW)
+    assert repaired["changed"] is True
+    assert repaired["build_id"] != original["build_id"]
+    assert repaired["row_count"] == 1
+    assert repaired["source_gold_build_id"] == "core-first"
+    assert _aggregate_rows(spark, gold.gold_dashboard_read_plan(spark, paths.root))[0].observed_hours == 1
+    assert gold.gold_read_plan(spark, paths.root) == core_plan
+
+
 def test_dashboard_catalog_publication_and_conflicts_preserve_committed_data(
     delta_spark, published_gold, tmp_path,
 ):
