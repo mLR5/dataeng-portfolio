@@ -145,17 +145,24 @@ def test_gold_city_first_collection_comes_from_any_valid_table(spark):
     later = NOW.replace(day=20)
     inputs = _inputs(spark,
         observation_snapshots=[_row(gold.OBSERVATION_TABLE, city_id="gb_london", city_query="Londres",
-            source_timezone="Europe/London", collected_at_utc=later, observed_at_utc=later,
+            ingestion_id="later-collection", source_timezone="Europe/London", collected_at_utc=later, observed_at_utc=later,
             latitude=51.51, longitude=-0.12, temperature_c=14.0)],
         forecast_daily_snapshots=[_row(gold.FORECAST_DAILY_TABLE, city_id="gb_london", city_query="Londres",
-            source_timezone="Europe/London", collected_at_utc=first, target_local_date=first.date(),
+            ingestion_id="first-collection", source_timezone="Europe/London", collected_at_utc=first, target_local_date=first.date(),
             latitude=51.50, longitude=-0.11)],
         quarantine=[_row(gold.QUARANTINE, city_query="Londres", scope="row", code="location_mismatch")])
-    cities = {r.city_id: r for r in gold._gold_dim_city(spark, inputs).collect()}
-    assert cities["gb_london"].first_collected_at_utc == first.replace(tzinfo=None)
-    assert cities["gb_london"].latitude == 51.50
-    assert cities["gb_london"].timezone == "Europe/London"
-    assert cities["fr_paris"].first_collected_at_utc is None
+    rows = gold._gold_dim_city(spark, inputs).orderBy("city_id", "valid_from_utc").collect()
+    london = [r for r in rows if r.city_id == "gb_london"]
+    # Origin version without validated coordinates, then one version per change.
+    assert [(r.valid_from_utc, r.latitude, r.longitude) for r in london] == [
+        (gold.GOLD_CITY_VALID_FROM_ORIGIN.replace(tzinfo=None), None, None),
+        (first.replace(tzinfo=None), 51.50, -0.11),
+        (later.replace(tzinfo=None), 51.51, -0.12),
+    ]
+    assert {r.first_collected_at_utc for r in london} == {first.replace(tzinfo=None)}
+    assert all(r.timezone == "Europe/London" for r in london)
+    paris = [r for r in rows if r.city_id == "fr_paris"]
+    assert len(paris) == 1 and paris[0].first_collected_at_utc is None and paris[0].is_current
 
 
 def test_gold_collection_failed_is_not_a_geography_rejection(spark):

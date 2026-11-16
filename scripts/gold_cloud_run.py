@@ -233,7 +233,7 @@ def main(argv=None):
                   "operation": "validation"}
         if args.production:
             report["production_run"] = client.production_run("silver-weatherapi", args.timeout_seconds)
-            params.update(operation="production_verify", production_root=root + "/gold/weatherapi",
+            params.update(operation="production_verify", production_root=root + "/gold/weatherapi_v2",
                           uc_schema=re.sub(r"[^a-z0-9_]", "_", (args.project_name + "_" + args.environment).lower()) + ".gold")
         report["validation"] = client.submit_validation(folder, params, args.run_tag, args.timeout_seconds)
         report["success"] = True

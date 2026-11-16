@@ -112,11 +112,11 @@ def test_failed_build_keeps_previous_snapshot_visible_then_recovers(
     write = gold._write_gold_table
     calls = []
 
-    def interrupt(spark, paths, name, frame):
+    def interrupt(spark, paths, name, frame, merge=None):
         calls.append(name)
         if len(calls) == 3:
             raise RuntimeError("simulated interruption between Gold table commits")
-        return write(spark, paths, name, frame)
+        return write(spark, paths, name, frame, merge)
 
     monkeypatch.setattr(gold, "_write_gold_table", interrupt)
     with pytest.raises(RuntimeError, match="simulated interruption"):
@@ -130,6 +130,7 @@ def test_failed_build_keeps_previous_snapshot_visible_then_recovers(
     monkeypatch.setattr(gold, "_write_gold_table", write)
     repaired = gold.run_gold(delta_spark, silver_root=silver_root.root, gold_root=root)
     assert repaired["changed"] is True
+    assert repaired["load_mode"] == "incremental"  # MERGEs are idempotent after the interruption
     assert repaired["source_count"] == 2
     assert repaired["new_sources"] == 1
     assert repaired["build_id"] != original["build_id"]

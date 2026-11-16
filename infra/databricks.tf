@@ -51,6 +51,8 @@ variable "databricks_tenant_id" {
   sensitive = true
 }
 
+# gold_root: GOLD_VERSION 2.0.0 (incremental MERGE, SCD 2 cities) needs its own root;
+# the contract forbids mixing versions, gold/weatherapi (1.0.0) stays on storage.
 locals {
   databricks_count = var.databricks_enabled ? 1 : 0
   # Metastore-level names are shared by every workspace of the region.
@@ -64,7 +66,7 @@ locals {
   databricks_url      = var.databricks_enabled ? "https://${azapi_resource.databricks_workspace[0].output.properties.workspaceUrl}" : null
   bronze_root         = "abfss://bronze@${module.storage.name}.dfs.core.windows.net"
   silver_root         = "${local.datalake_root}/${var.databricks_silver_path}"
-  gold_root           = "${local.datalake_root}/gold/weatherapi"
+  gold_root           = "${local.datalake_root}/gold/weatherapi_v2"
   silver_notebook_dir = "/Shared/weather-silver"
   silver_notebooks = var.databricks_enabled ? toset([
     "silver_rules", "silver_bronze_contract", "silver_contract", "silver_cities", "silver_quality",
@@ -345,7 +347,10 @@ resource "databricks_job" "silver" {
       base_parameters = {
         silver_root = local.silver_root
         gold_root   = local.gold_root
-        uc_schema   = "${databricks_catalog.weather[0].name}.${databricks_schema.gold[0].name}"
+        # Incremental MERGE every night; full rebuild (reference) on Sundays UTC.
+        full_rebuild_weekday = "6"
+        # Names still on the v1 root are relocated (external definitions only).
+        uc_schema = "${databricks_catalog.weather[0].name}.${databricks_schema.gold[0].name}"
       }
     }
   }

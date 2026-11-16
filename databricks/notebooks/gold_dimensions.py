@@ -64,19 +64,114 @@ def _gold_city_aliases(spark):
     ], "city_id string, query_alias string")
 
 
+def _gold_union_locations(inputs):
+    columns = ["city_id", "ingestion_id", "collected_at_utc", "latitude", "longitude"]
+    return reduce(lambda left, right: left.unionByName(right),
+                  [inputs[name].select(*columns) for name in SILVER_DATA_TABLES])
+
+
+def _gold_city_locations(inputs):
+    """Control ledger: one validated location per (ingestion, city), rounded.
+
+    Every Silver row of a city in one ingestion comes from the same location
+    object; the ordering only makes an unexpected disagreement deterministic.
+    """
+    digits = GOLD_CITY_COORDINATE_DECIMALS
+    rows = (_gold_union_locations(inputs)
+            .withColumn("latitude", F.round("latitude", digits))
+            .withColumn("longitude", F.round("longitude", digits)))
+    order = Window.partitionBy("ingestion_id", "city_id").orderBy("latitude", "longitude")
+    rows = rows.withColumn("_rank", F.row_number().over(order)).where("_rank = 1")
+    return _gold_project_control(rows, "city_locations")
+
+
+def _gold_project_control(frame, name):
+    return frame.select(*(F.col(field.name).cast(field.dataType).alias(field.name)
+                          for field in GOLD_CONTROL_SCHEMAS[name]))
+
+
+def gold_timestamp_literal(instant):
+    """UTC timestamp literal independent of the Python process time zone."""
+    if instant.tzinfo is None:
+        raise ValueError("Gold instants must be timezone-aware")
+    text = instant.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+    return F.to_timestamp(F.lit(text))  # The session zone is fixed to UTC by run_gold.
+
+
+def _gold_city_sk_column(city_id, valid_from):
+    text = F.concat_ws("|", city_id, F.date_format(valid_from, "yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'"))
+    return F.substring(F.sha2(text, 256), 1, GOLD_CITY_SK_LENGTH)
+
+
+def gold_city_history(spark, locations, collections):
+    """dim_city SCD 2 from the location ledger and the collection instants.
+
+    Deterministic for a given set of ingestions, whatever their arrival order:
+    full and incremental builds derive the same history from the same ledger.
+    For each city and each collection instant the tracked attributes are the
+    registry values in force at that instant (GOLD_CITY_REGISTRY_CHANGES) and the
+    last validated coordinates at or before it. A new version starts at the first
+    instant whose tracked tuple differs from the previous one; the first version
+    starts at GOLD_CITY_VALID_FROM_ORIGIN, before any validated coordinate.
+    """
+    origin = gold_timestamp_literal(GOLD_CITY_VALID_FROM_ORIGIN)
+    registry = _gold_city_registry(spark)
+    instants = (collections.where("collected_at_utc IS NOT NULL").select("collected_at_utc")
+                .unionByName(locations.select("collected_at_utc"))
+                .unionByName(spark.range(1).select(origin.alias("collected_at_utc")))
+                .distinct().withColumnRenamed("collected_at_utc", "_instant"))
+    per_instant = (locations.withColumn("_rank", F.row_number().over(
+                       Window.partitionBy("city_id", "collected_at_utc").orderBy("ingestion_id", "latitude", "longitude")))
+                   .where("_rank = 1")
+                   .select("city_id", F.col("collected_at_utc").alias("_instant"),
+                           F.struct("latitude", "longitude").alias("_seen")))
+    stream = registry.crossJoin(instants).join(per_instant, ["city_id", "_instant"], "left")
+    by_time = Window.partitionBy("city_id").orderBy("_instant")
+    stream = stream.withColumn("_coords", F.last("_seen", ignorenulls=True).over(
+        by_time.rowsBetween(Window.unboundedPreceding, Window.currentRow)))
+    stream = stream.withColumn("latitude", F.col("_coords.latitude")).withColumn("longitude", F.col("_coords.longitude"))
+    for city_id, effective, changes in sorted(GOLD_CITY_REGISTRY_CHANGES, key=lambda item: (item[1], item[0])):
+        if set(changes) - set(GOLD_CITY_TRACKED_ATTRIBUTES) - {"hemisphere"}:
+            raise ValueError("GOLD_CITY_REGISTRY_CHANGES may only change tracked attributes")
+        applies = (F.col("city_id") == F.lit(city_id)) & (
+            F.col("_instant") >= gold_timestamp_literal(effective))
+        for column, value in changes.items():
+            stream = stream.withColumn(column, F.when(applies, F.lit(value)).otherwise(F.col(column)))
+    same = reduce(lambda left, right: left & right, (
+        F.col(name).eqNullSafe(F.lag(name).over(by_time)) for name in GOLD_CITY_TRACKED_ATTRIBUTES))
+    starts = (stream.withColumn("_start", (F.row_number().over(by_time) == 1) | ~same)
+              .where(F.col("_start")))
+    versions = Window.partitionBy("city_id").orderBy("_instant")
+    first = locations.groupBy("city_id").agg(F.min("collected_at_utc").alias("first_collected_at_utc"))
+    history = (starts.withColumn("valid_from_utc", F.col("_instant"))
+               .withColumn("valid_to_utc", F.lead("_instant").over(versions))
+               .withColumn("is_current", F.col("valid_to_utc").isNull())
+               .withColumn("city_sk", _gold_city_sk_column(F.col("city_id"), F.col("valid_from_utc")))
+               .join(first, "city_id", "left"))
+    return _gold_dimension_project(history, "dim_city")
+
+
 def _gold_dim_city(spark, inputs):
-    columns = ["city_id", "collected_at_utc", "latitude", "longitude", "ingestion_id", "source_sha256"]
-    locations = reduce(lambda left, right: left.unionByName(right),
-                       [inputs[name].select(*columns) for name in SILVER_DATA_TABLES]).distinct()
-    first = (locations.withColumn("_rank", F.row_number().over(Window.partitionBy("city_id")
-             .orderBy("collected_at_utc", "ingestion_id", "source_sha256", "latitude", "longitude")))
-             .where("_rank = 1").select("city_id", "latitude", "longitude",
-                 F.col("collected_at_utc").alias("first_collected_at_utc")))
-    return _gold_dimension_project(_gold_city_registry(spark).join(first, "city_id", "left"), "dim_city")
+    """Full-history dim_city from Silver inputs (reference build)."""
+    collections = inputs[PUBLICATIONS].select("collected_at_utc")
+    return gold_city_history(spark, _gold_city_locations(inputs), collections)
 
 
-def _gold_observations(inputs):
-    raw = inputs[OBSERVATION_TABLE]
+def gold_resolve_city_sk(frame, dim_city, instant, table):
+    """Attach the dim_city version valid at ``instant`` (valid_from <= t < valid_to)."""
+    versions = F.broadcast(dim_city.select(
+        F.col("city_id").alias("_city_id"), F.col("city_sk").alias("_city_sk"),
+        F.col("valid_from_utc").alias("_valid_from"), F.col("valid_to_utc").alias("_valid_to")))
+    at = F.col(instant)
+    condition = ((F.col("city_id") == F.col("_city_id")) & (F.col("_valid_from") <= at)
+                 & (F.col("_valid_to").isNull() | (at < F.col("_valid_to"))))
+    base = frame.drop("city_sk") if "city_sk" in frame.columns else frame
+    resolved = base.join(versions, condition, "left").withColumn("city_sk", F.col("_city_sk"))
+    return _gold_dimension_project(resolved, table)
+
+
+def gold_canonical_observations(raw):
+    """One canonical observation per (city, hour_utc), without city_sk resolution."""
     candidates = (raw.withColumn("hour_utc", F.date_trunc("hour", F.col("observed_at_utc") + F.expr("INTERVAL 30 MINUTES")))
                   .withColumn("distance_to_hour_min", F.abs(F.unix_micros("observed_at_utc")
                       - F.unix_micros("hour_utc")) / F.lit(60_000_000.0)))
@@ -86,14 +181,29 @@ def _gold_observations(inputs):
     kept = candidates.withColumn("_rank", F.row_number().over(order)).where("_rank = 1")
     local = F.from_utc_timestamp(F.col("hour_utc"), F.col("source_timezone"))
     kept = kept.withColumn("local_date", F.to_date(local)).withColumn("local_hour", F.hour(local))
+    if "city_sk" not in kept.columns:
+        kept = kept.withColumn("city_sk", F.lit(None).cast("string"))
     return _gold_dimension_project(kept, "fact_observation_hourly")
 
 
-def _gold_dim_date(inputs, observations):
+def _gold_observations(inputs, dim_city=None):
+    observations = gold_canonical_observations(inputs[OBSERVATION_TABLE])
+    if dim_city is None:
+        return observations
+    return gold_resolve_city_sk(observations, dim_city, "collected_at_utc", "fact_observation_hourly")
+
+
+def gold_reference_dates(inputs, observations):
+    """Dates referenced by collections, canonical observations and forecast targets."""
     dates = inputs[PUBLICATIONS].select(F.to_date("collected_at_utc").alias("date"))
     dates = dates.unionByName(observations.select(F.col("local_date").alias("date")))
     for name in (FORECAST_TABLE, FORECAST_DAILY_TABLE):
         dates = dates.unionByName(inputs[name].select(F.col("target_local_date").alias("date")))
+    return dates
+
+
+def gold_calendar(dates):
+    """Contiguous calendar between the first and last referenced dates."""
     span = dates.agg(F.min("date").alias("_first"), F.max("date").alias("_last"))
     calendar = (span.where("_first IS NOT NULL")
                 .select(F.explode(F.sequence("_first", "_last")).alias("date")))
@@ -106,6 +216,10 @@ def _gold_dim_date(inputs, observations):
         F.weekofyear("date").alias("iso_week"), iso_day.alias("day_of_week"),
         F.element_at(day_names, iso_day).alias("day_name"), iso_day.isin(6, 7).alias("is_weekend"))
     return _gold_dimension_project(calendar, "dim_date")
+
+
+def _gold_dim_date(inputs, observations):
+    return gold_calendar(gold_reference_dates(inputs, observations))
 
 
 # WeatherAPI's published condition-code groups. New codes are visible as unknown;
@@ -121,16 +235,29 @@ _GOLD_CONDITION_GROUPS = {
 }
 
 
-def _gold_dim_condition(inputs):
+def gold_condition_counts(inputs):
+    """SCD 1 control: label counts per (code, is_day, label) for these ingestions."""
     conditions = inputs[OBSERVATION_TABLE].select("condition_code", "is_day", "condition_text")
     conditions = conditions.unionByName(inputs[FORECAST_TABLE].select("condition_code", "is_day", "condition_text"))
     conditions = conditions.unionByName(inputs[FORECAST_DAILY_TABLE].select(
         "condition_code", F.lit(True).alias("is_day"), "condition_text"))
     counts = (conditions.where("condition_code IS NOT NULL AND is_day IS NOT NULL")
-               .groupBy("condition_code", "is_day", "condition_text").count())
-    order = Window.partitionBy("condition_code", "is_day").orderBy(F.col("count").desc(), F.col("condition_text").asc_nulls_last())
+              .groupBy("condition_code", "is_day", F.col("condition_text").alias("label"))
+              .agg(F.count("*").alias("n")))
+    return _gold_project_control(counts, "condition_label_counts")
+
+
+def gold_add_condition_counts(old, new):
+    """Absolute totals of old+new counts (idempotent when rewritten by MERGE)."""
+    total = old.unionByName(new).groupBy("condition_code", "is_day", "label").agg(F.sum("n").alias("n"))
+    return _gold_project_control(total, "condition_label_counts")
+
+
+def gold_dim_condition_from_counts(counts):
+    """Most frequent label, lexical tie-break (NULL label last), and its category."""
+    order = Window.partitionBy("condition_code", "is_day").orderBy(F.col("n").desc(), F.col("label").asc_nulls_last())
     dimension = (counts.withColumn("_rank", F.row_number().over(order)).where("_rank = 1")
-                  .select("condition_code", "is_day", F.col("condition_text").alias("label_fr")))
+                  .select("condition_code", "is_day", F.col("label").alias("label_fr")))
     category = F.lit("unknown")
     for name, codes in _GOLD_CONDITION_GROUPS.items():
         category = F.when(F.col("condition_code").isin(*codes), F.lit(name)).otherwise(category)
@@ -142,6 +269,10 @@ def _gold_dim_condition(inputs):
     return _gold_dimension_project(dimension, "dim_condition")
 
 
+def _gold_dim_condition(inputs):
+    return gold_dim_condition_from_counts(gold_condition_counts(inputs))
+
+
 def _gold_dim_collection(publications):
     frame = publications.select("*", F.from_json("summary_json", _GOLD_SUMMARY_SCHEMA).alias("_summary"))
     frame = (frame.withColumn("collected_date", F.to_date("collected_at_utc"))
@@ -151,8 +282,9 @@ def _gold_dim_collection(publications):
     return _gold_dimension_project(frame, "dim_collection")
 
 
-def _gold_collection_city(spark, inputs):
-    pubs = inputs[PUBLICATIONS].select("ingestion_id", F.from_json("summary_json", _GOLD_SUMMARY_SCHEMA).alias("_summary"))
+def _gold_collection_city(spark, inputs, dim_city=None):
+    pubs = inputs[PUBLICATIONS].select("ingestion_id", "collected_at_utc",
+                                       F.from_json("summary_json", _GOLD_SUMMARY_SCHEMA).alias("_summary"))
     cities = _gold_city_registry(spark).select("city_id")
     aliases = _gold_city_aliases(spark)
     empty = F.array().cast("array<string>")
@@ -194,21 +326,32 @@ def _gold_collection_city(spark, inputs):
                .when(evidence, "collected").otherwise("not_requested"))
     frame = frame.withColumn("collection_status", status).withColumn("rejected_rows", rejected)
     frame = frame.withColumn("forecast_hourly_expected", F.coalesce(expected, F.lit(0)))
-    return _gold_dimension_project(frame, "fact_collection_city")
+    if dim_city is None:
+        return _gold_dimension_project(frame.withColumn("city_sk", F.lit(None).cast("string")), "fact_collection_city")
+    # An untrusted (NULL) collection instant resolves no version: city_sk stays NULL.
+    return gold_resolve_city_sk(frame, dim_city, "collected_at_utc", "fact_collection_city")
 
 
-def build_gold_dimensions(spark, inputs):
+def build_gold_dimensions(spark, inputs, controls=None):
     """Build four dimensions, collection-city coverage and canonical observations.
 
     The caller fixes the UTC Spark session zone and supplies complete-publication
     inputs. No table is written and no processing-time value affects the result.
+    ``controls`` may carry precomputed city_locations and condition_label_counts.
     """
-    observations = _gold_observations(inputs)
+    controls = controls or gold_controls(inputs)
+    dim_city = gold_city_history(spark, controls["city_locations"], inputs[PUBLICATIONS].select("collected_at_utc"))
+    observations = _gold_observations(inputs, dim_city)
     return {
-        "dim_city": _gold_dim_city(spark, inputs),
+        "dim_city": dim_city,
         "dim_date": _gold_dim_date(inputs, observations),
-        "dim_condition": _gold_dim_condition(inputs),
+        "dim_condition": gold_dim_condition_from_counts(controls["condition_label_counts"]),
         "dim_collection": _gold_dim_collection(inputs[PUBLICATIONS]),
-        "fact_collection_city": _gold_collection_city(spark, inputs),
+        "fact_collection_city": _gold_collection_city(spark, inputs, dim_city),
         "fact_observation_hourly": observations,
     }
+
+
+def gold_controls(inputs):
+    return {"city_locations": _gold_city_locations(inputs),
+            "condition_label_counts": gold_condition_counts(inputs)}
