@@ -23,4 +23,5 @@ report = run_gold(spark, silver_root=silver_root, gold_root=gold_root,
                   minimum_coverage_pct=float(dbutils.widgets.get("minimum_coverage_pct")))
 if uc_schema:
     register_gold_tables(spark, GoldPaths(gold_root), uc_schema)
+report["dashboard"] = run_gold_dashboard(spark, gold_root=gold_root, uc_schema=uc_schema)
 report

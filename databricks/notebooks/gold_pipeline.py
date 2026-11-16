@@ -44,6 +44,10 @@ class GoldPaths:
             return f"{self.root}/{name}"
         if name == "builds":
             return f"{self.root}/_control/builds"
+        if name == "agg_city_daily":
+            return f"{self.root}/{name}"
+        if name == "dashboard_builds":
+            return f"{self.root}/_control/dashboard_builds"
         raise ValueError("Unknown Gold table")
 
 
@@ -333,3 +337,204 @@ def register_gold_tables(spark, paths, uc_schema):
                 raise CatalogConflict(f"Gold name already points elsewhere: {name}")
         else:
             spark.sql(f"CREATE TABLE {qualified} USING DELTA LOCATION '{paths.table(name)}'")
+
+# COMMAND ----------
+# MAGIC %md
+# MAGIC ## Publication des lectures du dashboard
+# MAGIC Le contrat des dix tables reste indépendant. L'agrégat a son propre registre,
+# MAGIC publié après validation et création des vues. Les vues sont mises à jour une
+# MAGIC par une : leur DDL ne constitue pas une transaction multi-objets.
+# COMMAND ----------
+
+DASHBOARD_BUILD_SCHEMA = T.StructType([
+    T.StructField("build_id", T.StringType(), False),
+    T.StructField("build_sequence", T.LongType(), False),
+    T.StructField("dashboard_version", T.StringType(), False),
+    T.StructField("source_gold_build_id", T.StringType(), False),
+    T.StructField("source_table_versions_json", T.StringType(), False),
+    T.StructField("aggregate_version", T.LongType(), False),
+    T.StructField("row_count", T.LongType(), False),
+    T.StructField("uc_schema", T.StringType(), False),
+    T.StructField("view_signature", T.StringType(), False),
+    T.StructField("completed_at_utc", T.TimestampType(), False),
+])
+
+
+def latest_gold_dashboard_build(spark, paths):
+    if not DeltaTable.isDeltaTable(spark, paths.table("dashboard_builds")):
+        return None
+    rows = (spark.read.format("delta").load(paths.table("dashboard_builds"))
+            .orderBy(F.desc("build_sequence")).limit(1).collect())
+    return rows[0].asDict() if rows else None
+
+
+def gold_dashboard_read_plan(spark, gold_root):
+    """Pin the last completed aggregate and the exact core Gold inputs it used."""
+    paths = GoldPaths(gold_root)
+    build = latest_gold_dashboard_build(spark, paths)
+    if build is None:
+        raise ValueError("No complete Gold dashboard build")
+    return {
+        "build_id": build["build_id"], "source_gold_build_id": build["source_gold_build_id"],
+        "dashboard_version": build["dashboard_version"],
+        "aggregate": {"path": paths.table("agg_city_daily"), "version": build["aggregate_version"]},
+        "source_tables": {name: {"path": paths.table(name), "version": version}
+                          for name, version in json.loads(build["source_table_versions_json"]).items()},
+    }
+
+
+def validate_gold_daily_aggregate(frame):
+    """Reject broken identities, coverage and missing-value semantics before publish."""
+    schema = AGG_CITY_DAILY_SCHEMA
+    if frame.schema.fieldNames() != schema.fieldNames() or any(
+            frame.schema[f.name].dataType != f.dataType for f in schema):
+        raise ValueError("Gold daily aggregate schema differs from contract")
+    required = reduce(lambda a, b: a | b,
+                      (F.col(f.name).isNull() for f in schema if not f.nullable), F.lit(False))
+    if frame.where(required).limit(1).count():
+        raise ValueError("Gold daily aggregate required value missing")
+    if frame.groupBy(*AGG_CITY_DAILY_KEYS).count().where("count > 1").limit(1).count():
+        raise ValueError("Gold daily aggregate duplicate key")
+    invalid = (~F.col("expected_hours").isin(23, 24, 25)
+               | (F.col("observed_hours") < 0)
+               | (F.col("observed_hours") > F.col("expected_hours"))
+               | (F.abs(F.col("coverage_pct") - F.col("observed_hours") * 100.0
+                        / F.col("expected_hours")) > 1e-8)
+               | (F.col("is_complete") != (F.col("observed_hours") == F.col("expected_hours"))))
+    for metric in ("temperature", "humidity", "wind", "wind_gust", "precipitation"):
+        count = F.col(f"{metric}_observed_hours")
+        invalid = invalid | (count < 0) | (count > F.col("observed_hours"))
+    for count, metrics in (
+            ("temperature_observed_hours", ("temperature_min_c", "temperature_max_c", "temperature_avg_c")),
+            ("humidity_observed_hours", ("humidity_avg_pct",)),
+            ("wind_observed_hours", ("wind_avg_kph", "wind_max_kph")),
+            ("wind_gust_observed_hours", ("wind_gust_max_kph",)),
+            ("precipitation_observed_hours", ("precipitation_total_mm",))):
+        for metric in metrics:
+            invalid = invalid | ((F.col(count) == 0) != F.col(metric).isNull())
+    invalid = (invalid
+               | (F.col("precipitation_is_complete") != (
+                   F.col("precipitation_observed_hours") == F.col("expected_hours")))
+               | (F.col("sunrise_utc").isNull() != F.col("sunset_utc").isNull())
+               | (F.col("sunrise_utc").isNull() != F.col("daylight_hours").isNull())
+               | (F.col("sunset_utc") < F.col("sunrise_utc"))
+               | (F.col("daylight_hours") < 0) | (F.col("daylight_hours") > 25))
+    if frame.where(invalid).limit(1).count():
+        raise ValueError("Gold daily aggregate invalid coverage or metric values")
+    return frame.count()
+
+
+def _write_gold_dashboard_aggregate(spark, paths, frame):
+    path = paths.table("agg_city_daily")
+    if DeltaTable.isDeltaTable(spark, path):
+        stored = spark.read.format("delta").load(path).schema
+        if [(f.name, f.dataType) for f in stored] != [(f.name, f.dataType) for f in AGG_CITY_DAILY_SCHEMA]:
+            raise ValueError("Gold daily aggregate stored schema differs from contract")
+    (frame.write.format("delta").mode("overwrite")
+     .option("delta.enableDeletionVectors", "false").save(path))
+    detail = spark.sql(f"DESCRIBE DETAIL {_delta(path)}").first()
+    if list(detail["clusteringColumns"]) != ["city_id", "local_date"]:
+        spark.sql(f"ALTER TABLE {_delta(path)} CLUSTER BY (`city_id`, `local_date`)")
+    return _version(spark, path)
+
+
+def _dashboard_qualified(uc_schema, name):
+    catalog, schema = uc_schema.split(".")
+    return f"`{catalog}`.`{schema}`.`{name}`"
+
+
+def _check_dashboard_catalog(spark, paths, uc_schema, queries):
+    """Preflight every name before overwriting data or replacing any view."""
+    complete = True
+    for name in (*GOLD_SCHEMAS, "agg_city_daily"):
+        qualified = _dashboard_qualified(uc_schema, name)
+        if spark.catalog.tableExists(qualified):
+            if spark.catalog.getTable(qualified).tableType == "VIEW":
+                raise CatalogConflict(f"Gold dashboard table name is already a view: {name}")
+            location = spark.sql(f"DESCRIBE DETAIL {qualified}").first()["location"]
+            if not _same_location(location, paths.table(name)):
+                raise CatalogConflict(f"Gold dashboard name already points elsewhere: {name}")
+        elif name in GOLD_SCHEMAS:
+            raise CatalogConflict("Register the complete core Gold tables before dashboard views")
+        else:
+            complete = False
+    for name in queries:
+        qualified = _dashboard_qualified(uc_schema, name)
+        if spark.catalog.tableExists(qualified):
+            if spark.catalog.getTable(qualified).tableType != "VIEW":
+                raise CatalogConflict(f"Gold dashboard view name is already a table: {name}")
+            properties = {row["key"]: row["value"] for row in spark.sql(
+                f"SHOW TBLPROPERTIES {qualified}").collect()}
+            if properties.get("weatherapi.dashboard") != DASHBOARD_VERSION:
+                raise CatalogConflict(f"Gold dashboard refuses to replace an unowned view: {name}")
+        else:
+            complete = False
+    return complete
+
+
+def _publish_gold_dashboard_views(spark, paths, uc_schema, queries):
+    aggregate = _dashboard_qualified(uc_schema, "agg_city_daily")
+    if not spark.catalog.tableExists(aggregate):
+        spark.sql(f"CREATE TABLE {aggregate} USING DELTA LOCATION '{paths.table('agg_city_daily')}'")
+    for name, query in queries.items():
+        qualified = _dashboard_qualified(uc_schema, name)
+        spark.sql(f"CREATE OR REPLACE VIEW {qualified} "
+                  f"TBLPROPERTIES ('weatherapi.dashboard' = '{DASHBOARD_VERSION}') AS {query}")
+        # Resolve the persisted definition before publishing the completion marker.
+        spark.sql(f"SELECT * FROM {qualified} LIMIT 0").collect()
+
+
+def run_gold_dashboard(spark, *, gold_root, uc_schema="", now=None, force=False):
+    """Publish aggregate + optional serving views from a committed core Gold build.
+
+    Exactly one writer may publish to a Gold root. Core tables and their ledger
+    are never modified here. A failed aggregate/DDL write leaves the previous
+    completed dashboard read plan available; retry finishes the publication.
+    View replacement is sequential, so clients needing cross-view consistency
+    must coordinate with the ledger rather than assume a multi-view transaction.
+    """
+    if not isinstance(uc_schema, str) or (uc_schema and not _UC_SCHEMA.fullmatch(uc_schema)):
+        raise ValueError("uc_schema must be catalogue.schema")
+    if type(force) is not bool:
+        raise ValueError("force must be a boolean")
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    paths = GoldPaths(gold_root)
+    source = gold_read_plan(spark, paths.root)
+    if source["gold_version"] != GOLD_VERSION or set(source["tables"]) != set(GOLD_SCHEMAS):
+        raise PublicationConflict("Gold dashboard requires a complete current core Gold contract")
+    versions = {name: spec["version"] for name, spec in source["tables"].items()}
+    queries = gold_dashboard_view_queries(uc_schema, source_versions=versions) if uc_schema else {}
+    signature = hashlib.sha256(json.dumps(queries, sort_keys=True).encode()).hexdigest()
+    previous = latest_gold_dashboard_build(spark, paths)
+    if previous and previous["dashboard_version"] != DASHBOARD_VERSION:
+        raise PublicationConflict("Dashboard version changed; use another Gold root")
+    catalog_complete = not uc_schema or _check_dashboard_catalog(spark, paths, uc_schema, queries)
+    aggregate_complete = (previous is not None
+                          and DeltaTable.isDeltaTable(spark, paths.table("agg_city_daily"))
+                          and _version(spark, paths.table("agg_city_daily")) == previous["aggregate_version"])
+    if (previous and not force and previous["source_gold_build_id"] == source["build_id"]
+            and previous["uc_schema"] == uc_schema and previous["view_signature"] == signature
+            and catalog_complete and aggregate_complete):
+        return {"changed": False, "build_id": previous["build_id"],
+                "source_gold_build_id": source["build_id"], "row_count": previous["row_count"],
+                "aggregate_version": previous["aggregate_version"], "views": list(queries)}
+    tables = {name: read_gold(spark, source, name) for name in
+              ("dim_city", "fact_observation_hourly", "fact_forecast_daily")}
+    aggregate = build_gold_daily_aggregate(spark, tables)
+    version = _write_gold_dashboard_aggregate(spark, paths, aggregate)
+    candidate = spark.read.format("delta").option("versionAsOf", version).load(paths.table("agg_city_daily"))
+    count = validate_gold_daily_aggregate(candidate)
+    if uc_schema:
+        _publish_gold_dashboard_views(spark, paths, uc_schema, queries)
+    record = {
+        "build_id": uuid.uuid4().hex,
+        "build_sequence": previous["build_sequence"] + 1 if previous else 1,
+        "dashboard_version": DASHBOARD_VERSION, "source_gold_build_id": source["build_id"],
+        "source_table_versions_json": json.dumps(versions, sort_keys=True),
+        "aggregate_version": version, "row_count": count, "uc_schema": uc_schema,
+        "view_signature": signature, "completed_at_utc": now or datetime.now(timezone.utc),
+    }
+    (spark.createDataFrame([record], DASHBOARD_BUILD_SCHEMA).write.format("delta").mode("append")
+     .option("delta.enableDeletionVectors", "false").save(paths.table("dashboard_builds")))
+    return {"changed": True, "build_id": record["build_id"], "source_gold_build_id": source["build_id"],
+            "row_count": count, "aggregate_version": version, "views": list(queries)}

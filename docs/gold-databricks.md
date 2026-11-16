@@ -6,8 +6,12 @@ mode de livraison, le même compute serverless et le workflow **Deploy
 Infrastructure**. Le contrat détaillé et les décisions manquantes de la v3
 sont explicités dans [gold-contract.md](gold-contract.md).
 
-Les agrégats `agg_city_daily`, les vues du dashboard,
-`features_city_hourly` et MLflow appartiennent aux étapes suivantes.
+La branche de l'étape 5 ajoute `agg_city_daily` et les trois vues du dashboard
+dans ces mêmes notebooks. Leur contrat, leurs API et leurs précautions de
+publication sont décrits dans [gold-dashboard.md](gold-dashboard.md). Ce lot
+est en développement et validation locale ; il n'a pas encore été validé sur
+Databricks ni déployé en production. Les pages du dashboard,
+`features_city_hourly` et MLflow restent à réaliser.
 
 ## Notebooks et job
 
@@ -18,6 +22,10 @@ Les agrégats `agg_city_daily`, les vues du dashboard,
 | `gold_forecasts` | Prévisions horaires et quotidiennes, erreurs face aux observations disponibles |
 | `gold_pipeline` | Assemblage des composants, lecture Silver publiée, contrôles et publication Gold |
 | `gold_build` | Point d'entrée du job et widgets d'exécution |
+
+Dans la branche de l'étape 5, `gold_build` appelle aussi `run_gold_dashboard`
+après le Gold de base et son éventuel enregistrement Unity Catalog. Aucun
+nouveau notebook ni changement Terraform du job n'est nécessaire pour ce lot.
 
 Les cinq notebooks sont déployés sous `/Shared/weather-silver/`, aux côtés
 des notebooks Silver. Les `%run` relatifs utilisent ainsi les mêmes composants

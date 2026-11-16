@@ -4,8 +4,12 @@ Version du traitement : `GOLD_VERSION = "1.0.0"`. Schémas exécutables, nullabi
 clés et relations : [gold_contract.py](../databricks/notebooks/gold_contract.py).
 
 Ce contrat implémente l'étape 4 du modèle WeatherAPI v4 : quatre dimensions et six
-faits. `agg_city_daily`, les vues du dashboard et `features_city_hourly` appartiennent
-aux étapes suivantes. Il utilise Silver v2 sans modifier ses règles ni ses snapshots.
+faits. Il utilise Silver v2 sans modifier ses règles ni ses snapshots. La branche
+de l'étape 5 ajoute un contrat distinct pour `agg_city_daily` et les vues du
+dashboard, décrit dans [gold-dashboard.md](gold-dashboard.md), sans modifier les
+dix tables ci-dessous ni `GOLD_VERSION`. Ce nouveau lot est en développement et
+validation locale ; il n'est pas encore validé sur Databricks ni déployé en
+production. Les pages du dashboard et `features_city_hourly` restent à réaliser.
 
 Le document v4 renvoie à une v3 non présente dans le dépôt pour plusieurs détails.
 Les choix complémentaires ci-dessous sont donc explicités ; ils ne sont pas
@@ -117,8 +121,8 @@ facultatif est absent. Les valeurs météo manquantes ne sont pas remplacées pa
 ## Prévisions et erreurs
 
 Le fait horaire conserve uniquement `lead_time_hours > 0`. Il garde toutes les
-émissions d'une même cible : choisir la dernière prévision appartient aux futures
-vues du dashboard. Une nouvelle collecte ne remplace pas les anciennes émissions.
+émissions d'une même cible ; les [vues du dashboard](gold-dashboard.md) choisissent
+la dernière prévision disponible. Une nouvelle collecte ne remplace pas les anciennes émissions.
 
 La prévision quotidienne conserve `lead_days` de -1 à 2 inclus. `is_day = true`
 permet sa relation avec la dimension de condition. Les textes et instants de lever

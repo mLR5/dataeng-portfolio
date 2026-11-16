@@ -175,3 +175,26 @@ GOLD_CLUSTER_COLUMNS = {
     "fact_forecast_daily": ("city_id", "target_local_date"),
     "fact_forecast_daily_error": ("city_id", "target_local_date"),
 }
+
+# COMMAND ----------
+
+# Step 5 is a separate derived contract. These definitions intentionally do not
+# modify the ten-table Gold v1 contract or its transformation version.
+DASHBOARD_VERSION = "1.0.0"
+AGG_CITY_DAILY_KEYS = ("city_id", "local_date")
+AGG_CITY_DAILY_SCHEMA = T.StructType(_gold_fields([
+    ("city_id", _GS), ("local_date", _GDATE),
+    ("expected_hours", _GL), ("observed_hours", _GL),
+    ("coverage_pct", _GD), ("is_complete", _GB),
+    ("temperature_observed_hours", _GL),
+    ("temperature_min_c", _GD, True), ("temperature_max_c", _GD, True),
+    ("temperature_avg_c", _GD, True),
+    ("humidity_observed_hours", _GL), ("humidity_avg_pct", _GD, True),
+    ("wind_observed_hours", _GL), ("wind_avg_kph", _GD, True),
+    ("wind_max_kph", _GD, True),
+    ("wind_gust_observed_hours", _GL), ("wind_gust_max_kph", _GD, True),
+    ("precipitation_observed_hours", _GL),
+    ("precipitation_total_mm", _GD, True), ("precipitation_is_complete", _GB),
+    ("sunrise_utc", _GT, True), ("sunset_utc", _GT, True),
+    ("daylight_hours", _GD, True),
+]))

@@ -212,3 +212,79 @@ def build_gold_dimensions(spark, inputs):
         "fact_collection_city": _gold_collection_city(spark, inputs),
         "fact_observation_hourly": observations,
     }
+
+
+# COMMAND ----------
+
+def build_gold_daily_aggregate(spark, tables):
+    """Derive one sampled-weather row per city/local day from frozen Gold v1.
+
+    The calendar starts at each city's first valid collected local date and ends
+    at its last canonical observed local date. Missing intervening dates remain
+    visible with zero observations and null weather, including before London's
+    first valid observation only if another valid table established that city.
+    Every coverage denominator is a whole IANA local day, including incomplete
+    boundary days. Repeated autumn clock hours are distinct canonical UTC hours.
+
+    Temperature extrema are extrema of the available hourly samples, not station
+    daily extrema. Precipitation is the sum of reported hourly sample values,
+    with its count and completeness flag; incomplete totals are never silently
+    presented as complete-day measurements. Nothing imputes a missing metric.
+
+    Sunrise/sunset use the latest forecast containing a valid pair for the same
+    local day. A newer incomplete pair falls back to an older complete pair;
+    events from different predictions are never combined. No source pair means
+    both events and daylight are null. This is a dashboard aggregate, not an
+    as-of feature table for model training.
+    """
+    if spark.conf.get("spark.sql.session.timeZone") != "UTC":
+        raise ValueError("Gold daily aggregates require the UTC Spark session timezone")
+    observations = tables["fact_observation_hourly"]
+    cities = tables["dim_city"].select("city_id", "timezone", "first_collected_at_utc")
+    last_days = observations.groupBy("city_id").agg(F.max("local_date").alias("_last_date"))
+    limits = (cities.join(last_days, "city_id", "inner")
+              .withColumn("_first_date", F.to_date(F.from_utc_timestamp(
+                  F.col("first_collected_at_utc"), F.col("timezone"))))
+              .where(F.col("_first_date").isNotNull() & (F.col("_first_date") <= F.col("_last_date"))))
+    calendar = limits.select("city_id", "timezone",
+        F.explode(F.sequence("_first_date", "_last_date")).alias("local_date"))
+    midnight = F.to_utc_timestamp(F.col("local_date").cast("timestamp"), F.col("timezone"))
+    next_midnight = F.to_utc_timestamp(F.date_add("local_date", 1).cast("timestamp"), F.col("timezone"))
+    calendar = calendar.withColumn("expected_hours", (
+        (F.unix_micros(next_midnight) - F.unix_micros(midnight)) / F.lit(3_600_000_000)).cast("long"))
+
+    summary = observations.groupBy("city_id", "local_date").agg(
+        F.countDistinct("hour_utc").alias("observed_hours"),
+        F.count("temperature_c").alias("temperature_observed_hours"),
+        F.min("temperature_c").alias("temperature_min_c"),
+        F.max("temperature_c").alias("temperature_max_c"),
+        F.avg("temperature_c").alias("temperature_avg_c"),
+        F.count("humidity_pct").alias("humidity_observed_hours"),
+        F.avg("humidity_pct").alias("humidity_avg_pct"),
+        F.count("wind_kph").alias("wind_observed_hours"),
+        F.avg("wind_kph").alias("wind_avg_kph"),
+        F.max("wind_kph").alias("wind_max_kph"),
+        F.count("wind_gust_kph").alias("wind_gust_observed_hours"),
+        F.max("wind_gust_kph").alias("wind_gust_max_kph"),
+        F.count("precipitation_mm").alias("precipitation_observed_hours"),
+        F.sum("precipitation_mm").alias("precipitation_total_mm"))
+
+    daily = tables["fact_forecast_daily"].join(cities.select("city_id", "timezone"), "city_id", "inner")
+    valid_pair = (F.col("sunrise_utc").isNotNull() & F.col("sunset_utc").isNotNull()
+                  & (F.col("sunset_utc") >= F.col("sunrise_utc"))
+                  & (F.to_date(F.from_utc_timestamp(F.col("sunrise_utc"), F.col("timezone"))) == F.col("target_local_date"))
+                  & (F.to_date(F.from_utc_timestamp(F.col("sunset_utc"), F.col("timezone"))) == F.col("target_local_date")))
+    pair_order = Window.partitionBy("city_id", "target_local_date").orderBy(
+        F.col("issued_at_utc").desc(), F.col("ingestion_id").asc(),
+        F.col("sunrise_utc").asc(), F.col("sunset_utc").asc())
+    solar = (daily.where(valid_pair).withColumn("_rank", F.row_number().over(pair_order)).where("_rank = 1")
+              .select("city_id", F.col("target_local_date").alias("local_date"), "sunrise_utc", "sunset_utc"))
+    result = calendar.join(summary, ["city_id", "local_date"], "left").join(solar, ["city_id", "local_date"], "left")
+    counts = ["observed_hours", "temperature_observed_hours", "humidity_observed_hours", "wind_observed_hours",
+              "wind_gust_observed_hours", "precipitation_observed_hours"]
+    result = (result.fillna(0, subset=counts)
+              .withColumn("coverage_pct", F.col("observed_hours") * F.lit(100.0) / F.col("expected_hours"))
+              .withColumn("is_complete", F.col("observed_hours") == F.col("expected_hours"))
+              .withColumn("precipitation_is_complete", F.col("precipitation_observed_hours") == F.col("expected_hours"))
+              .withColumn("daylight_hours", (F.unix_micros("sunset_utc") - F.unix_micros("sunrise_utc")) / F.lit(3_600_000_000.0)))
+    return result.select(*(F.col(field.name).cast(field.dataType).alias(field.name) for field in AGG_CITY_DAILY_SCHEMA))
