@@ -13,7 +13,7 @@
 for name in ("silver_root", "validation_root", "reference_root", "incremental_root", "cut_date",
              "production_root", "gold_root", "uc_schema"):
     dbutils.widgets.text(name, "")
-dbutils.widgets.dropdown("operation", "validation", ["validation", "production_verify"])
+dbutils.widgets.dropdown("operation", "validation", ["validation", "production_verify", "incremental_benchmark"])
 
 # COMMAND ----------
 
@@ -227,9 +227,108 @@ def verify_gold_production(spark, *, silver_root, gold_root, uc_schema=""):
     _log("GOLD_PRODUCTION_VERIFIED", **report)
     return report
 
+def _gv_coordinate_profile(frozen):
+    """Do Silver coordinates vary between collections of the same city?"""
+    columns = ["city_id", "ingestion_id", "latitude", "longitude"]
+    rows = reduce(lambda a, b: a.unionByName(b), [frozen[n].select(*columns) for n in SILVER_DATA_TABLES])
+    digits = GOLD_CITY_COORDINATE_DECIMALS
+    profile = rows.groupBy("city_id").agg(
+        F.countDistinct("ingestion_id").alias("collections"),
+        F.countDistinct("latitude", "longitude").alias("distinct_raw"),
+        F.countDistinct(F.round("latitude", digits), F.round("longitude", digits)).alias("distinct_rounded_4"),
+        F.min("latitude").alias("latitude_min"), F.max("latitude").alias("latitude_max"),
+        F.min("longitude").alias("longitude_min"), F.max("longitude").alias("longitude_max"))
+    return [row.asDict() for row in profile.orderBy("city_id").collect()]
+
+
+def _gv_differences(spark, left_root, right_root):
+    left, right = gold_read_plan(spark, left_root), gold_read_plan(spark, right_root)
+    differences = {}
+    for name in (*GOLD_SCHEMAS, *GOLD_CONTROL_SCHEMAS):
+        a, b = read_gold(spark, left, name), read_gold(spark, right, name)
+        differences[name] = a.exceptAll(b).count() + b.exceptAll(a).count()
+    return differences
+
+
+def benchmark_gold_incremental(spark, *, silver_root, validation_root):
+    """Full build vs incremental build (last UTC day held back, then added), isolated.
+
+    Writes only below gold/_validation/incremental/<run>; no Unity Catalog registration.
+    """
+    source = SilverPaths(silver_root).root
+    validation = SilverPaths(validation_root).root
+    if "/gold/_validation/incremental/" not in validation + "/" or validation.endswith("/gold/_validation/incremental"):
+        raise ValueError("Benchmark writes require gold/_validation/incremental/<run>")
+    if source.startswith(validation) or validation.startswith(source + "/"):
+        raise ValueError("Benchmark outputs must be separate from Silver")
+    reference, incremental, snapshot = (validation + "/reference", validation + "/incremental",
+                                        validation + "/silver_snapshot")
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    for root in (reference, incremental):
+        if latest_gold_build(spark, GoldPaths(root)) is not None:
+            raise ValueError("Benchmark requires fresh output roots")
+    snapshot_paths = SilverPaths(snapshot)
+    for name in SPARK_SCHEMAS:
+        if DeltaTable.isDeltaTable(spark, snapshot_paths.table(name)):
+            raise ValueError("Benchmark requires a fresh frozen Silver root")
+    frozen, source_ids, _, source_versions, _ = _gold_inputs(spark, source, None, None, None)
+    span = frozen[PUBLICATIONS].agg(F.max("collected_at_utc").alias("last")).first()
+    last_day = span["last"].date()
+    coordinates = _gv_coordinate_profile(frozen)
+    _log("GOLD_BENCHMARK_FREEZE", source_count=len(source_ids), last_collection_date=last_day,
+         coordinates=coordinates)
+    copied_versions = {}
+    for name in SILVER_DATA_TABLES:
+        (frozen[name].write.format("delta").mode("error")
+         .option("delta.enableDeletionVectors", "false").save(snapshot_paths.table(name)))
+        copied_versions[name] = _version(spark, snapshot_paths.table(name))
+    (frozen[QUARANTINE].write.format("delta").mode("error")
+     .option("delta.enableDeletionVectors", "false").save(snapshot_paths.table(QUARANTINE)))
+    publications = frozen[PUBLICATIONS]
+    for name, version_column in PUBLICATION_VERSION_COLUMNS.items():
+        publications = publications.withColumn(version_column, F.lit(copied_versions[name]).cast("long"))
+    (publications.write.format("delta").mode("error")
+     .option("delta.enableDeletionVectors", "false").save(snapshot_paths.table(PUBLICATIONS)))
+
+    timings = {}
+
+    def timed(label, **arguments):
+        started = _gold_monotonic()
+        report = run_gold(spark, silver_root=snapshot, minimum_coverage_pct=0, **arguments)
+        timings[label] = round(_gold_monotonic() - started, 1)
+        _log("GOLD_BENCHMARK_" + label.upper(), seconds=timings[label],
+             **{k: v for k, v in report.items() if k != "quality"})
+        return report
+
+    full = timed("full", gold_root=reference, mode="full")
+    prefix = timed("prefix", gold_root=incremental, end_date=last_day.isoformat())
+    added = timed("incremental", gold_root=incremental)
+    replay = timed("replay", gold_root=incremental)
+    differences = _gv_differences(spark, reference, incremental)
+    report = {
+        "status": "passed" if not any(differences.values()) and added["load_mode"] == "incremental" else "failed",
+        "operation": "incremental_benchmark", "source_count": len(source_ids),
+        "held_back_last_day": last_day.isoformat(), "held_back_sources": added["new_sources"],
+        "seconds": timings, "load_modes": {"full": full["load_mode"], "prefix": prefix["load_mode"],
+                                           "incremental": added["load_mode"], "replay": replay["load_mode"]},
+        "row_counts_full": full["row_counts"], "row_counts_incremental": added["row_counts"],
+        "row_counts_equal": full["row_counts"] == added["row_counts"],
+        "quality_equal": full["quality"] == added["quality"],
+        "differences": differences, "windows": added["windows"], "coordinates": coordinates,
+        "replay_changed": replay["changed"],
+    }
+    _log("GOLD_BENCHMARK_COMPLETE", **report)
+    if report["status"] != "passed":
+        raise AssertionError("Incremental Gold differs from the full reference: " + json.dumps(report, default=str))
+    return report
+
 # COMMAND ----------
 
-if dbutils.widgets.get("operation") == "production_verify":
+if dbutils.widgets.get("operation") == "incremental_benchmark":
+    validation_report = benchmark_gold_incremental(spark,
+        silver_root=dbutils.widgets.get("silver_root"),
+        validation_root=dbutils.widgets.get("validation_root"))
+elif dbutils.widgets.get("operation") == "production_verify":
     validation_report = verify_gold_production(spark,
         silver_root=dbutils.widgets.get("silver_root"),
         gold_root=dbutils.widgets.get("production_root") or dbutils.widgets.get("gold_root"),

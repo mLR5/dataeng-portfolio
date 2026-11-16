@@ -210,6 +210,8 @@ def main(argv=None):
     parser.add_argument("--run-tag", default=os.getenv("GOLD_RUN_TAG", datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")))
     parser.add_argument("--cut-date", default=os.getenv("GOLD_CUT_DATE", ""))
     parser.add_argument("--production", action="store_true")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Full vs incremental Gold under gold/_validation/incremental, no catalog")
     parser.add_argument("--timeout-seconds", type=int, default=6600)
     parser.add_argument("--report", type=Path, default=Path("/tmp/gold-stage4-result.json"))
     args = parser.parse_args(argv)
@@ -231,7 +233,10 @@ def main(argv=None):
                   "validation_root": validation_root, "reference_root": validation_root + "/reference",
                   "incremental_root": validation_root + "/incremental", "cut_date": args.cut_date,
                   "operation": "validation"}
-        if args.production:
+        if args.benchmark:
+            params = {"silver_root": root + "/" + args.silver_path, "operation": "incremental_benchmark",
+                      "validation_root": root + "/gold/_validation/incremental/" + args.run_tag}
+        elif args.production:
             report["production_run"] = client.production_run("silver-weatherapi", args.timeout_seconds)
             params.update(operation="production_verify", production_root=root + "/gold/weatherapi_v2",
                           uc_schema=re.sub(r"[^a-z0-9_]", "_", (args.project_name + "_" + args.environment).lower()) + ".gold")
