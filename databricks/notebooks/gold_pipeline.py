@@ -188,12 +188,27 @@ def _gold_keys(name):
     return GOLD_TABLE_KEYS[name] if name in GOLD_TABLE_KEYS else GOLD_CONTROL_KEYS[name]
 
 
+def _gold_null_safe(left, right, columns):
+    return [left[c].eqNullSafe(right[c]) for c in columns]
+
+
 def _gold_merge(spark, path, name, frame, merge):
     if merge.kind not in ("insert", "upsert"):
         raise ValueError("Unknown Gold MERGE strategy")
+    if merge.delete_condition and merge.kind != "upsert":
+        raise ValueError("Insert-only Gold tables never delete")
     schema, keys = _gold_schema(name), _gold_keys(name)
-    if not merge.delete_condition and not frame.limit(1).count():
-        return  # Nothing to insert or update: no Delta commit.
+    target = spark.read.format("delta").load(path)
+    # Skip the MERGE (and its commit) when it would change nothing: one cheap
+    # query instead of a MERGE rewriting nothing.
+    compared = keys if merge.kind == "insert" else schema.fieldNames()
+    changes = frame.join(target, _gold_null_safe(frame, target, compared), "left_anti").select(F.lit(1))
+    if merge.delete_condition:
+        removed = (target.where(F.expr(merge.delete_condition.replace("target.", "")))
+                   .join(frame, _gold_null_safe(target, frame, keys), "left_anti").select(F.lit(1)))
+        changes = changes.unionByName(removed)
+    if not changes.limit(1).count():
+        return
     # Null-safe equality only where the contract allows a NULL key (a NULL label).
     on = " AND ".join(
         f"target.`{k}` {'<=>' if schema[k].nullable else '='} source.`{k}`" for k in keys)
@@ -205,8 +220,6 @@ def _gold_merge(spark, path, name, frame, merge):
             clauses.append(f"WHEN MATCHED AND ({differs}) THEN UPDATE SET *")
     clauses.append("WHEN NOT MATCHED THEN INSERT *")
     if merge.delete_condition:
-        if merge.kind != "upsert":
-            raise ValueError("Insert-only Gold tables never delete")
         clauses.append(f"WHEN NOT MATCHED BY SOURCE AND ({merge.delete_condition}) THEN DELETE")
     view = f"gold_source_{uuid.uuid4().hex}"
     frame.createOrReplaceTempView(view)
@@ -370,20 +383,20 @@ def gold_city_history_compatible(before, after, collections):
         return (dim.crossJoin(limit).where(F.col("valid_from_utc") <= F.col("_limit"))
                 .select("city_id", "city_sk", "valid_from_utc"))
     old, new = boundaries(before), boundaries(after)
-    return not (old.exceptAll(new).limit(1).count() or new.exceptAll(old).limit(1).count())
+    return not old.exceptAll(new).unionByName(new.exceptAll(old)).limit(1).count()
 
 
 # --- Validation -----------------------------------------------------------------
 
-def _gold_validate_city_history(tables):
+def _gold_city_history_violations(spark, tables):
+    """(message, offending rows) of the SCD 2 rules and of the city_sk resolution."""
     cities = tables["dim_city"]
-    registry = {city.city_id for city in CITIES}
-    present = {row[0] for row in cities.select("city_id").distinct().collect()}
-    if present != registry:
-        raise ValueError("Gold dim_city must contain exactly the registry cities")
+    registry = _gold_city_registry(spark).select("city_id")
+    present = cities.select("city_id").distinct()
+    yield ("Gold dim_city must contain exactly the registry cities",
+           registry.join(present, "city_id", "left_anti").unionByName(present.join(registry, "city_id", "left_anti")))
     current = cities.groupBy("city_id").agg(F.sum(F.col("is_current").cast("int")).alias("n"))
-    if current.where("n != 1").limit(1).count():
-        raise ValueError("Gold dim_city requires exactly one current row per city")
+    yield "Gold dim_city requires exactly one current row per city", current.where("n != 1")
     order = Window.partitionBy("city_id").orderBy("valid_from_utc")
     origin = gold_timestamp_literal(GOLD_CITY_VALID_FROM_ORIGIN)
     checked = (cities.withColumn("_next", F.lead("valid_from_utc").over(order))
@@ -393,8 +406,8 @@ def _gold_validate_city_history(tables):
            | ((F.col("_position") == 1) & (F.col("valid_from_utc") != origin))
            | (F.col("valid_to_utc").isNotNull() & (F.col("valid_to_utc") <= F.col("valid_from_utc")))
            | (F.col("city_sk") != _gold_city_sk_column(F.col("city_id"), F.col("valid_from_utc"))))
-    if checked.where(bad).limit(1).count():
-        raise ValueError("Gold dim_city validity must be contiguous, non-overlapping and deterministic")
+    yield ("Gold dim_city validity must be contiguous, non-overlapping and deterministic",
+           checked.where(bad))
     versions = cities.select(F.col("city_sk").alias("_sk"), F.col("city_id").alias("_city"),
                              F.col("valid_from_utc").alias("_from"), F.col("valid_to_utc").alias("_to"))
     instants = tables["dim_collection"].select("ingestion_id", "collected_at_utc")
@@ -407,32 +420,17 @@ def _gold_validate_city_history(tables):
         wrong = (F.when(at.isNull(), F.col("city_sk").isNotNull())
                  .otherwise(F.col("_sk").isNull() | (F.col("_city") != F.col("city_id"))
                             | (F.col("_from") > at) | (F.col("_to").isNotNull() & (at >= F.col("_to")))))
-        if resolved.where(wrong).limit(1).count():
-            raise ValueError(f"Gold city_sk is not the version valid at the collection instant: {name}")
+        yield (f"Gold city_sk is not the version valid at the collection instant: {name}",
+               resolved.where(wrong))
 
 
-def validate_gold(spark, tables):
-    """Blocking schema, identity and reference checks over materialised candidates."""
-    if set(tables) != set(GOLD_SCHEMAS):
-        raise ValueError("Gold transform did not produce all ten tables")
-    counts = {}
-    for name, schema in GOLD_SCHEMAS.items():
-        frame = tables[name]
-        if frame.schema.fieldNames() != schema.fieldNames() or any(
-                frame.schema[field.name].dataType != field.dataType for field in schema):
-            raise ValueError(f"Gold schema differs from contract: {name}")
-        required = [F.col(f.name).isNull() for f in schema if not f.nullable]
-        bad = reduce(lambda a, b: a | b, required, F.lit(False))
-        stats = frame.agg(F.count("*").alias("n"),
-                          F.sum(F.when(bad, 1).otherwise(0)).alias("bad")).first()
-        if stats["bad"]:
-            raise ValueError(f"Gold required value missing: {name}")
-        if frame.groupBy(*GOLD_TABLE_KEYS[name]).count().where("count > 1").limit(1).count():
-            raise ValueError(f"Gold duplicate key: {name}")
-        counts[name] = stats["n"]
-    if tables["dim_city"].groupBy("city_id", "valid_from_utc").count().where("count > 1").limit(1).count():
-        raise ValueError("Gold duplicate key: dim_city (city_id, valid_from_utc)")
-
+def _gold_violations(spark, tables):
+    """Every blocking rule as (message, offending rows), in reporting priority."""
+    for name in GOLD_SCHEMAS:
+        yield (f"Gold duplicate key: {name}",
+               tables[name].groupBy(*GOLD_TABLE_KEYS[name]).count().where("count > 1"))
+    yield ("Gold duplicate key: dim_city (city_id, valid_from_utc)",
+           tables["dim_city"].groupBy("city_id", "valid_from_utc").count().where("count > 1"))
     for child, relations in GOLD_FOREIGN_KEYS.items():
         for child_columns, parent, parent_columns in relations:
             # Optional code/day and optional collection date can be incomplete.
@@ -444,48 +442,73 @@ def validate_gold(spark, tables):
             targets = tables[parent].select(*[
                 F.col(source).alias(target) for source, target in zip(parent_columns, child_columns)
             ])
-            if references.join(targets, list(child_columns), "left_anti").limit(1).count():
-                raise ValueError(f"Gold unresolved reference: {child} -> {parent}")
-    _gold_validate_city_history(tables)
-
+            yield (f"Gold unresolved reference: {child} -> {parent}",
+                   references.join(targets, list(child_columns), "left_anti"))
+    yield from _gold_city_history_violations(spark, tables)
     for child, parent in (("fact_forecast_hourly_error", "fact_forecast_hourly"),
                           ("fact_forecast_daily_error", "fact_forecast_daily")):
         # The natural forecast key must identify the same source ingestion as
         # its error row, even though ingestion_id is not itself part of that key.
         identity = [*GOLD_TABLE_KEYS[parent], "ingestion_id", "city_sk"]
-        if tables[child].select(*identity).join(
-                tables[parent].select(*identity), identity, "left_anti").limit(1).count():
-            raise ValueError(f"Gold error references another forecast ingestion: {child}")
+        yield (f"Gold error references another forecast ingestion: {child}",
+               tables[child].select(*identity).join(tables[parent].select(*identity), identity, "left_anti"))
     observation_identity = ["city_id", "target_hour_utc", "observation_ingestion_id"]
     observation_targets = tables["fact_observation_hourly"].select(
         "city_id", F.col("hour_utc").alias("target_hour_utc"),
         F.col("ingestion_id").alias("observation_ingestion_id"))
-    if tables["fact_forecast_hourly_error"].select(*observation_identity).join(
-            observation_targets, observation_identity, "left_anti").limit(1).count():
-        raise ValueError("Gold hourly error references another canonical observation ingestion")
-
+    yield ("Gold hourly error references another canonical observation ingestion",
+           tables["fact_forecast_hourly_error"].select(*observation_identity).join(
+               observation_targets, observation_identity, "left_anti"))
     collection_city = tables["fact_collection_city"]
-    if collection_city.where(~F.col("collection_status").isin(*GOLD_COLLECTION_STATUSES)).limit(1).count():
-        raise ValueError("Gold unknown collection status")
+    yield ("Gold unknown collection status",
+           collection_city.where(~F.col("collection_status").isin(*GOLD_COLLECTION_STATUSES)))
     counters = ["observation_valid", "forecast_hourly_valid", "forecast_hourly_expected",
                 "forecast_daily_valid", "rejected_rows", "nulled_metrics"]
     negative = reduce(lambda a, b: a | b, (F.col(name) < 0 for name in counters), F.lit(False))
-    if collection_city.where(negative).limit(1).count():
-        raise ValueError("Gold negative collection count")
-    if tables["fact_forecast_daily"].where(~F.col("lead_days").between(-1, 2)).limit(1).count():
-        raise ValueError("Gold daily lead_days outside [-1,2]")
+    yield "Gold negative collection count", collection_city.where(negative)
+    yield ("Gold daily lead_days outside [-1,2]",
+           tables["fact_forecast_daily"].where(~F.col("lead_days").between(-1, 2)))
     daily_error_parent = tables["fact_forecast_daily_error"].select(
         *GOLD_TABLE_KEYS["fact_forecast_daily"]).join(
         tables["fact_forecast_daily"].select(*GOLD_TABLE_KEYS["fact_forecast_daily"], "lead_days"),
         list(GOLD_TABLE_KEYS["fact_forecast_daily"]), "inner")
-    if daily_error_parent.where("lead_days < 0").limit(1).count():
-        raise ValueError("Gold daily error uses a past forecast")
-    daily_errors = tables["fact_forecast_daily_error"]
-    if daily_errors.where(~F.col("expected_hours").isin(23, 24, 25)
-                          | (F.col("observed_hours") != F.col("expected_hours"))).limit(1).count():
-        raise ValueError("Gold daily error requires complete local-day observations")
-    if tables["fact_forecast_hourly"].where("lead_time_hours <= 0").limit(1).count():
-        raise ValueError("Gold hourly forecast must be future")
+    yield "Gold daily error uses a past forecast", daily_error_parent.where("lead_days < 0")
+    yield ("Gold daily error requires complete local-day observations",
+           tables["fact_forecast_daily_error"].where(
+               ~F.col("expected_hours").isin(23, 24, 25) | (F.col("observed_hours") != F.col("expected_hours"))))
+    yield "Gold hourly forecast must be future", tables["fact_forecast_hourly"].where("lead_time_hours <= 0")
+
+
+def validate_gold(spark, tables):
+    """Blocking schema, identity and reference checks over materialised candidates.
+
+    Two Spark jobs: row counts with required values, then every other rule at
+    once; the first failing rule in priority order is reported.
+    """
+    if set(tables) != set(GOLD_SCHEMAS):
+        raise ValueError("Gold transform did not produce all ten tables")
+    for name, schema in GOLD_SCHEMAS.items():
+        frame = tables[name]
+        if frame.schema.fieldNames() != schema.fieldNames() or any(
+                frame.schema[field.name].dataType != field.dataType for field in schema):
+            raise ValueError(f"Gold schema differs from contract: {name}")
+    stats = []
+    for name, schema in GOLD_SCHEMAS.items():
+        required = [F.col(f.name).isNull() for f in schema if not f.nullable]
+        bad = reduce(lambda a, b: a | b, required, F.lit(False))
+        stats.append(tables[name].agg(F.count("*").alias("n"), F.sum(F.when(bad, 1).otherwise(0)).alias("bad"))
+                     .select(F.lit(name).alias("table"), "n", F.coalesce("bad", F.lit(0)).alias("bad")))
+    rows = {row["table"]: row for row in reduce(lambda a, b: a.unionByName(b), stats).collect()}
+    for name in GOLD_SCHEMAS:
+        if rows[name]["bad"]:
+            raise ValueError(f"Gold required value missing: {name}")
+    counts = {name: rows[name]["n"] for name in GOLD_SCHEMAS}
+    rules = list(_gold_violations(spark, tables))
+    found = reduce(lambda a, b: a.unionByName(b), [
+        frame.limit(1).select(F.lit(index).alias("rule")) for index, (_, frame) in enumerate(rules)])
+    failed = sorted(row["rule"] for row in found.collect())
+    if failed:
+        raise ValueError(rules[failed[0]][0])
     return counts
 
 
@@ -556,7 +579,6 @@ def _gold_incremental(spark, paths, previous, source):
     old_control_versions = json.loads(previous["control_versions_json"])
     old = {name: _gold_pinned(spark, paths, name, v) for name, v in old_versions.items()}
     old_controls = {name: _gold_pinned(spark, paths, name, v) for name, v in old_control_versions.items()}
-    current = {name: _gold_current(spark, paths, name) for name in ("dim_city", "dim_collection")}
 
     # dim_city SCD 2 is recomputed from the small location ledger (any arrival order).
     new_controls = gold_controls(new)
@@ -565,11 +587,14 @@ def _gold_incremental(spark, paths, previous, source):
     collections = old["dim_collection"].select("collected_at_utc").unionByName(
         new_collections.select("collected_at_utc"))
     dim_city = gold_city_history(spark, locations, collections)
-    # Also against the physical tables: an interrupted attempt may have inserted
-    # facts beyond the manifest with the dimension it computed then.
-    if not (gold_city_history_compatible(old["dim_city"], dim_city, old["dim_collection"])
-            and gold_city_history_compatible(current["dim_city"], dim_city, current["dim_collection"])):
+    if not gold_city_history_compatible(old["dim_city"], dim_city, old["dim_collection"]):
         return None
+    # Also against the physical tables when an interrupted attempt moved them
+    # beyond the manifest: its facts used the dimension it computed then.
+    if any(_gold_table_version(spark, paths, name) != old_versions[name] for name in ("dim_city", "dim_collection")):
+        if not gold_city_history_compatible(_gold_current(spark, paths, "dim_city"), dim_city,
+                                            _gold_current(spark, paths, "dim_collection")):
+            return None
 
     specs = gold_window_specs(gold_affected_windows(new))
     windows = _gold_windows_frame(spark, specs) if specs else None

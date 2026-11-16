@@ -56,11 +56,11 @@ def late(k):
 
 
 def batches():
-    """Four arrival batches. The canonical-hour truth of C_24 (22:00 UTC on
-    18 October) arrives after forecasts of C_0..C_23 targeting it."""
+    """Three arrival batches. L_2 (batch 2) improves an hour published by batch 1;
+    the canonical-hour truth of C_24 (22:00 UTC on 18 October, batch 3) arrives
+    after forecasts of C_0..C_23 targeting it; L_20 then changes a complete day."""
     return [
-        [regular(k) for k in range(0, 8)],
-        [regular(k) for k in range(8, 16)],
-        [regular(k) for k in range(16, 24)] + [late(2)],
+        [regular(k) for k in range(0, 12)],
+        [regular(k) for k in range(12, 24)] + [late(2)],
         [regular(24), late(20)],
     ]

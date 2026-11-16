@@ -302,3 +302,15 @@ def test_registration_refuses_to_drop_a_managed_gold_table(monkeypatch):
     with pytest.raises(gold.CatalogConflict, match="non-external"):
         gold.register_gold_tables(spark, gold.GoldPaths(ROOT), "weather.gold")
     assert not any(s.startswith("DROP") for s in spark.statements)
+
+
+def test_real_captures_carry_identical_four_decimal_coordinates():
+    """Measured on the two real-derived captures: no coordinate drift between them."""
+    from conftest import real_sources, silver_rules
+    seen = {}
+    for blob, raw in real_sources():
+        result = silver_rules.transform_bronze(raw, blob)
+        for name in gold.SILVER_DATA_TABLES:
+            for row in result.tables[name].to_pylist():
+                seen.setdefault(row["city_id"], set()).add((row["latitude"], row["longitude"]))
+    assert seen == {"fr_paris": {(48.8667, 2.3333)}, "be_brussels": {(50.8333, 4.3333)}}
